@@ -1,5 +1,5 @@
 # NextRound 
-*A smart, connected party breathalyzer*
+*A smart party breathalyzer*
 
 NextRound is a self-built, portable breathalyzer designed as a technical showcase in embedded systems, hardware design, and user interface development. The project blends sensor-based measurement with fun, social features, making it equally suitable for experimentation, learning, and demonstration purposes.
 
