@@ -182,6 +182,13 @@ const char *const *submenuItemsForMain(uint8_t index, size_t &count) {
 }
 
 
+constexpr uint8_t kIcon16 = 16;
+const uint8_t kIconHeating[] = {
+    0x00, 0x00, 0x10, 0x11, 0x20, 0x22, 0x20, 0x22, 0x10, 0x11, 0x88,
+    0x08, 0x44, 0x04, 0x44, 0x04, 0x88, 0x08, 0x10, 0x11, 0x20, 0x22,
+    0x20, 0x22, 0x10, 0x11, 0x88, 0x08, 0x00, 0x00, 0xfe, 0x7f,
+};
+
 void renderMeasurement(uint32_t nowMs) {
   display.clearBuffer();
   ui.renderStatusBar(appState);
@@ -196,10 +203,22 @@ void renderMeasurement(uint32_t nowMs) {
   display.setFont(u8g2_font_9x15_tf);
   const uint8_t titleWidth = display.getStrWidth(title);
   const uint8_t titleX = (kDisplayWidth - titleWidth) / 2;
-  display.setCursor(titleX, kMenuTop + 20);
+  const uint8_t titleY = kMenuTop + 20;
+  display.setCursor(titleX, titleY);
   display.print(title);
 
   if (heating) {
+    const uint8_t iconY = kMenuTop + 6;
+    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 4;
+    const int16_t rightX =
+        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 4;
+    if (leftX >= 0) {
+      display.drawXBMP(static_cast<uint8_t>(leftX), iconY, kIcon16, kIcon16, kIconHeating);
+    }
+    if (rightX + kIcon16 <= kDisplayWidth) {
+      display.drawXBMP(static_cast<uint8_t>(rightX), iconY, kIcon16, kIcon16, kIconHeating);
+    }
+
     const uint32_t remainingMs = kMeasureCountdownSec * 1000UL - elapsedMs;
     const uint32_t remainingSec = (remainingMs + 999) / 1000;
     char buffer[8];
@@ -322,7 +341,6 @@ void renderDuelPrompt(const String &user, const char *label) {
   display.sendBuffer();
 }
 
-constexpr uint8_t kIcon16 = 16;
 constexpr uint8_t kIcon15 = 15;
 const uint8_t kIconMeasure[] = {
     0x00, 0x00, 0x02, 0x00, 0x07, 0x00, 0x82, 0x3f, 0x42, 0x00, 0x22,
