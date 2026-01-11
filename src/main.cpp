@@ -8,7 +8,7 @@
 #include <math.h>
 #include <time.h>
 
-#include "ui/ui.h"
+#include "ui.h"
 #include "qrcode_bitmap.h"
 #include "pins.h"
 #include "minigames.h"
@@ -209,9 +209,11 @@ void renderMeasurement(uint32_t nowMs) {
 
   if (heating) {
     const uint8_t iconY = kMenuTop + 6;
-    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 4;
+    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 10;
     const int16_t rightX =
-        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 4;
+        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 10;
+    display.setDrawColor(1);
+    display.setBitmapMode(1);
     if (leftX >= 0) {
       display.drawXBMP(static_cast<uint8_t>(leftX), iconY, kIcon16, kIcon16, kIconHeating);
     }
