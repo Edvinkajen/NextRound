@@ -27,10 +27,12 @@ class OtaApServer {
   bool isActive() const;
   uint8_t getProgress() const;
   State getState() const;
+  bool isTestMode() const;
   const String &getPassword() const;
   const String &getPin() const;
   const String &getLastError() const;
 
+  void setTestMode(bool enabled);
   void onStateChange(StateCallback cb);
   void onProgress(ProgressCallback cb);
 
@@ -57,6 +59,9 @@ class OtaApServer {
   uint32_t startMs_ = 0;
   uint32_t lastActivityMs_ = 0;
   uint32_t rebootAtMs_ = 0;
+  uint32_t lastChannelSwitchMs_ = 0;
+  uint8_t channelIndex_ = 0;
+  bool testMode_ = false;
 
   StateCallback stateCallback_;
   ProgressCallback progressCallback_;

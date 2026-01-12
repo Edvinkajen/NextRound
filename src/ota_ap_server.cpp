@@ -6,6 +6,8 @@
 
 namespace {
 constexpr uint32_t kOtaTimeoutMs = 8UL * 60UL * 1000UL;
+constexpr uint32_t kOtaChannelCycleMs = 5000;
+constexpr uint8_t kOtaChannels[] = {1, 6, 11};
 
 const char kOtaHtml[] PROGMEM = R"HTML(
 <!doctype html>
@@ -102,6 +104,10 @@ OtaApServer::State OtaApServer::getState() const {
   return state_;
 }
 
+bool OtaApServer::isTestMode() const {
+  return testMode_;
+}
+
 const String &OtaApServer::getPassword() const {
   return password_;
 }
@@ -114,24 +120,62 @@ const String &OtaApServer::getLastError() const {
   return lastError_;
 }
 
+void OtaApServer::setTestMode(bool enabled) {
+  testMode_ = enabled;
+}
+
 void OtaApServer::begin() {
   if (isActive()) {
     return;
   }
   setState(State::Starting);
   resetUploadState();
-  password_ = makePassword();
+  password_ = testMode_ ? String() : makePassword();
   pin_ = makePin();
   lastError_ = "";
   startMs_ = millis();
   lastActivityMs_ = startMs_;
+  lastChannelSwitchMs_ = startMs_;
+  channelIndex_ = 0;
 
+  Serial.println("OTA: begin");
+  Serial.print("OTA: ssid=");
+  Serial.println(ssid_);
+  Serial.print("OTA: password=");
+  Serial.println(password_);
+  Serial.print("OTA: pin=");
+  Serial.println(pin_);
+  Serial.print("OTA: test mode=");
+  Serial.println(testMode_ ? "true" : "false");
+
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+  Serial.print("OTA: mode after WIFI_OFF=");
+  Serial.println(WiFi.getMode());
   WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(ssid_, password_.c_str())) {
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  const int apChannel = kOtaChannels[channelIndex_];
+  const bool apOk =
+      testMode_ ? WiFi.softAP(ssid_, nullptr, apChannel, false, 4)
+                : WiFi.softAP(ssid_, password_.c_str(), apChannel, false, 4);
+  Serial.print("OTA: softAP result=");
+  Serial.println(apOk ? "true" : "false");
+  if (!apOk) {
     lastError_ = "softAP failed";
     setState(State::Failed);
     return;
   }
+  delay(200);
+  const IPAddress apIp = WiFi.softAPIP();
+  Serial.print("OTA AP IP: ");
+  Serial.println(apIp);
+  Serial.print("OTA AP channel: ");
+  Serial.println(WiFi.channel());
+  Serial.print("OTA AP SSID: ");
+  Serial.println(WiFi.softAPSSID());
+  Serial.print("OTA AP MAC: ");
+  Serial.println(WiFi.softAPmacAddress());
 
   delete server_;
   server_ = new AsyncWebServer(80);
@@ -231,12 +275,26 @@ void OtaApServer::begin() {
       });
 
   server_->begin();
+  Serial.println("OTA: webserver started");
   setState(State::Waiting);
 }
 
 void OtaApServer::tick() {
   if (!isActive()) {
     return;
+  }
+  if (testMode_ && state_ == State::Waiting &&
+      millis() - lastChannelSwitchMs_ >= kOtaChannelCycleMs) {
+    channelIndex_ = static_cast<uint8_t>((channelIndex_ + 1) %
+                                         (sizeof(kOtaChannels) / sizeof(kOtaChannels[0])));
+    const int apChannel = kOtaChannels[channelIndex_];
+    const bool apOk =
+        WiFi.softAP(ssid_, testMode_ ? nullptr : password_.c_str(), apChannel, false, 4);
+    Serial.print("OTA: channel switch ");
+    Serial.print(apChannel);
+    Serial.print(" ok=");
+    Serial.println(apOk ? "true" : "false");
+    lastChannelSwitchMs_ = millis();
   }
   if (rebootAtMs_ > 0 && millis() >= rebootAtMs_) {
     delay(100);
@@ -257,6 +315,7 @@ void OtaApServer::end() {
   }
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
+  Serial.println("OTA: end");
   resetUploadState();
   setState(State::Idle);
 }

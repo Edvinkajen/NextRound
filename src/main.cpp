@@ -39,7 +39,7 @@ constexpr uint32_t kDuelResultMs = 5000;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
 Ui ui(display);
-OtaApServer otaServer("NextRound-Update");
+OtaApServer otaServer("NR_Update");
 
 const char *const kMenuItems[] = {
     "Measure",
@@ -79,6 +79,7 @@ const char *const kSettingsMenuItems[] = {
     "Sensor",
     "OFF Timer",
     "Firmware Update",
+    "FW Update Test",
     "Reset",
 };
 constexpr uint8_t kSettingCalibIndex = 1;
@@ -89,7 +90,8 @@ constexpr uint8_t kSettingWifiBleIndex = 5;
 constexpr uint8_t kSettingSensIndex = 6;
 constexpr uint8_t kSettingSleepIndex = 7;
 constexpr uint8_t kSettingOtaIndex = 8;
-constexpr uint8_t kSettingResetIndex = 9;
+constexpr uint8_t kSettingOtaTestIndex = 9;
+constexpr uint8_t kSettingResetIndex = 10;
 
 const char *const kWifiBleMenuItems[] = {
     "Return",
@@ -129,6 +131,7 @@ bool resetPending = false;
 uint32_t resetStartMs = 0;
 bool otaPending = false;
 uint32_t otaStartMs = 0;
+bool otaTestMode = false;
 const char kUsersFile[] = "/users.json";
 bool rouletteEnabled = false;
 RussianRoulette roulette;
@@ -190,11 +193,12 @@ const char *otaStateToString(OtaApServer::State state) {
 
 void startOtaMode() {
   // Stop BLE/WiFi tasks as needed before entering update mode.
+  otaServer.setTestMode(otaTestMode);
   otaServer.begin();
   if (otaServer.isActive()) {
     Serial.println("OTA update mode active");
     Serial.print("SSID: ");
-    Serial.println("NextRound-Update");
+    Serial.println("NR_Update");
     Serial.print("Password: ");
     Serial.println(otaServer.getPassword());
     Serial.print("PIN: ");
@@ -206,10 +210,17 @@ void startOtaMode() {
 void startOtaCountdown(uint32_t nowMs) {
   otaPending = true;
   otaStartMs = nowMs;
+  otaTestMode = false;
 }
 
 void cancelOtaCountdown() {
   otaPending = false;
+}
+
+void startOtaTestCountdown(uint32_t nowMs) {
+  otaPending = true;
+  otaStartMs = nowMs;
+  otaTestMode = true;
 }
 
 
@@ -891,7 +902,7 @@ void renderOtaInfo() {
   display.setCursor(2, top + 22);
   display.print("SSID:");
   display.setCursor(36, top + 22);
-  display.print("NextRound-Update");
+  display.print("NR_Update");
   display.setCursor(2, top + 32);
   display.print("IP:");
   display.setCursor(36, top + 32);
@@ -899,7 +910,8 @@ void renderOtaInfo() {
   display.setCursor(2, top + 42);
   display.print("PWD:");
   display.setCursor(36, top + 42);
-  display.print(otaServer.getPassword());
+  const String &pwd = otaServer.getPassword();
+  display.print(pwd.length() ? pwd : String("OPEN"));
   display.setCursor(2, top + 52);
   display.print("PIN:");
   display.setCursor(36, top + 52);
@@ -1484,6 +1496,10 @@ void loop() {
       }
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaIndex) {
         startOtaCountdown(nowMs);
+        return;
+      }
+      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaTestIndex) {
+        startOtaTestCountdown(nowMs);
         return;
       }
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingResetIndex) {
