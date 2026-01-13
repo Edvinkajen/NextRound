@@ -3,6 +3,7 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <esp_sleep.h>
+#include <esp_system.h>
 #include <driver/gpio.h>
 #include <LittleFS.h>
 #include <math.h>
@@ -12,7 +13,7 @@
 #include "qrcode_bitmap.h"
 #include "pins.h"
 #include "minigames.h"
-#include "ota_ap_server.h"
+#include "ota_update.cpp"
 
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kButtonLongPressMs = 800;
@@ -20,8 +21,6 @@ constexpr uint32_t kButtonExtraLongMs = 7000;
 constexpr uint32_t kUiTickMs = 30;
 constexpr uint32_t kSleepCountdownMs = 3000;
 constexpr uint32_t kResetCountdownMs = 10000;
-constexpr uint32_t kOtaCountdownMs = 5000;
-constexpr uint32_t kOtaExitHoldMs = 10000;
 constexpr uint16_t kSleepTimeoutMinSec = 0;
 constexpr uint16_t kSleepTimeoutMaxSec = 900;
 constexpr uint16_t kSleepTimeoutStepSec = 30;
@@ -39,7 +38,6 @@ constexpr uint32_t kDuelResultMs = 5000;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
 Ui ui(display);
-OtaApServer otaServer("NR_Update");
 
 const char *const kMenuItems[] = {
     "Measure",
@@ -79,7 +77,6 @@ const char *const kSettingsMenuItems[] = {
     "Sensor",
     "OFF Timer",
     "Firmware Update",
-    "FW Update Test",
     "Reset",
 };
 constexpr uint8_t kSettingCalibIndex = 1;
@@ -90,8 +87,7 @@ constexpr uint8_t kSettingWifiBleIndex = 5;
 constexpr uint8_t kSettingSensIndex = 6;
 constexpr uint8_t kSettingSleepIndex = 7;
 constexpr uint8_t kSettingOtaIndex = 8;
-constexpr uint8_t kSettingOtaTestIndex = 9;
-constexpr uint8_t kSettingResetIndex = 10;
+constexpr uint8_t kSettingResetIndex = 9;
 
 const char *const kWifiBleMenuItems[] = {
     "Return",
@@ -129,9 +125,6 @@ uint8_t wifiBleMenuIndex = 0;
 bool settingsDirty = false;
 bool resetPending = false;
 uint32_t resetStartMs = 0;
-bool otaPending = false;
-uint32_t otaStartMs = 0;
-bool otaTestMode = false;
 const char kUsersFile[] = "/users.json";
 bool rouletteEnabled = false;
 RussianRoulette roulette;
@@ -152,6 +145,7 @@ float duelMeasB = 0.0f;
 uint16_t sleepTimeoutSec = 300;
 uint32_t lastInteractionMs = 0;
 
+
 void scanI2c() {
   Serial.println("I2C scan start");
   uint8_t count = 0;
@@ -169,60 +163,6 @@ void scanI2c() {
   Serial.print("I2C scan done, found ");
   Serial.println(count);
 }
-
-const char *otaStateToString(OtaApServer::State state) {
-  switch (state) {
-    case OtaApServer::State::Idle:
-      return "idle";
-    case OtaApServer::State::Starting:
-      return "starting";
-    case OtaApServer::State::Waiting:
-      return "waiting";
-    case OtaApServer::State::Uploading:
-      return "uploading";
-    case OtaApServer::State::Success:
-      return "success";
-    case OtaApServer::State::Failed:
-      return "failed";
-    case OtaApServer::State::Timeout:
-      return "timeout";
-    default:
-      return "unknown";
-  }
-}
-
-void startOtaMode() {
-  // Stop BLE/WiFi tasks as needed before entering update mode.
-  otaServer.setTestMode(otaTestMode);
-  otaServer.begin();
-  if (otaServer.isActive()) {
-    Serial.println("OTA update mode active");
-    Serial.print("SSID: ");
-    Serial.println("NR_Update");
-    Serial.print("Password: ");
-    Serial.println(otaServer.getPassword());
-    Serial.print("PIN: ");
-    Serial.println(otaServer.getPin());
-    Serial.println("Open: http://192.168.4.1/");
-  }
-}
-
-void startOtaCountdown(uint32_t nowMs) {
-  otaPending = true;
-  otaStartMs = nowMs;
-  otaTestMode = false;
-}
-
-void cancelOtaCountdown() {
-  otaPending = false;
-}
-
-void startOtaTestCountdown(uint32_t nowMs) {
-  otaPending = true;
-  otaStartMs = nowMs;
-  otaTestMode = true;
-}
-
 
 bool hasSubmenuForMain(uint8_t index) {
   return index == 1 || index == 2 || index == kSettingsMenuIndex;
@@ -862,67 +802,6 @@ void renderResetCountdown(uint32_t nowMs) {
   display.sendBuffer();
 }
 
-void renderOtaCountdown(uint32_t nowMs) {
-  uint32_t remainingMs = 0;
-  if (nowMs < otaStartMs + kOtaCountdownMs) {
-    remainingMs = (otaStartMs + kOtaCountdownMs) - nowMs;
-  }
-  const uint8_t secondsLeft = static_cast<uint8_t>((remainingMs + 999) / 1000);
-
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(10, kMenuTop + 20);
-  display.print("OTA in:");
-
-  char buffer[8];
-  snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
-  display.setFont(u8g2_font_6x10_tf);
-  const uint8_t countWidth = display.getStrWidth(buffer);
-  const uint8_t countX = (kDisplayWidth - countWidth) / 2;
-  display.setCursor(countX, kMenuTop + 38);
-  display.print(buffer);
-  display.sendBuffer();
-}
-
-void renderOtaInfo() {
-  display.clearBuffer();
-  const uint8_t top = 0;
-  display.setDrawColor(0);
-  display.drawBox(0, top, kDisplayWidth, kDisplayHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_5x8_tf);
-  display.setCursor(2, top + 12);
-  display.print("OTA Mode");
-  display.setCursor(2, top + 22);
-  display.print("SSID:");
-  display.setCursor(36, top + 22);
-  display.print("NR_Update");
-  display.setCursor(2, top + 32);
-  display.print("IP:");
-  display.setCursor(36, top + 32);
-  display.print("192.168.4.1");
-  display.setCursor(2, top + 42);
-  display.print("PWD:");
-  display.setCursor(36, top + 42);
-  const String &pwd = otaServer.getPassword();
-  display.print(pwd.length() ? pwd : String("OPEN"));
-  display.setCursor(2, top + 52);
-  display.print("PIN:");
-  display.setCursor(36, top + 52);
-  display.print(otaServer.getPin());
-  display.setCursor(80, top + 52);
-  display.print(otaServer.getProgress());
-  display.print('%');
-
-  display.sendBuffer();
-}
-
 void renderWifiBleMenu(uint8_t selectedIndex) {
   display.clearBuffer();
   ui.renderStatusBar(appState);
@@ -1163,9 +1042,14 @@ void updateButton(uint32_t nowMs, bool &shortPress, bool &longPress, bool &extra
 
 void setup() {
   Serial.begin(115200);
+  Serial.println();
+  Serial.print("Reset reason: ");
+  Serial.println(static_cast<int>(esp_reset_reason()));
   delay(200);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_FAULT_BUTTON, INPUT_PULLUP);
+
+  ota_update::markAppValidCancelRollback();
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   scanI2c();
@@ -1196,15 +1080,6 @@ void setup() {
   roulette.reset();
   duel.disable();
   randomSeed(micros());
-  otaServer.onStateChange([](OtaApServer::State state) {
-    Serial.print("OTA state: ");
-    Serial.println(otaStateToString(state));
-  });
-  otaServer.onProgress([](uint8_t pct) {
-    Serial.print("OTA progress: ");
-    Serial.print(pct);
-    Serial.println("%");
-  });
   lastInteractionMs = millis();
 }
 
@@ -1216,31 +1091,6 @@ void loop() {
   updateButton(nowMs, shortPress, longPress, extraLongPress);
   if (shortPress || longPress || extraLongPress) {
     lastInteractionMs = nowMs;
-  }
-
-  if (otaServer.isActive()) {
-    otaServer.tick();
-    if (digitalRead(PIN_BUTTON) == LOW &&
-        (nowMs - button.pressedMs) >= kOtaExitHoldMs) {
-      otaServer.end();
-    }
-    if (nowMs - lastUiTickMs >= kUiTickMs) {
-      renderOtaInfo();
-      lastUiTickMs = nowMs;
-    }
-    return;
-  }
-
-  if (otaPending) {
-    if (shortPress || longPress || extraLongPress) {
-      cancelOtaCountdown();
-    } else if (nowMs - otaStartMs >= kOtaCountdownMs) {
-      otaPending = false;
-      startOtaMode();
-    } else {
-      renderOtaCountdown(nowMs);
-    }
-    return;
   }
 
   if (sleepPending) {
@@ -1492,14 +1342,6 @@ void loop() {
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingSleepIndex) {
         adjustingSetting = true;
         adjustingSettingSlot = 4;
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaIndex) {
-        startOtaCountdown(nowMs);
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaTestIndex) {
-        startOtaTestCountdown(nowMs);
         return;
       }
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingResetIndex) {
