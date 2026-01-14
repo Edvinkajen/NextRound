@@ -1,7 +1,7 @@
-# NextRound 
+# SlEirig™
 *A smart party breathalyzer*
 
-NextRound is a self-built, portable breathalyzer designed as a technical showcase in embedded systems, hardware design, and user interface development. The project blends sensor-based measurement with fun, social features, making it equally suitable for experimentation, learning, and demonstration purposes.
+SlEirig™ is a self-built, portable breathalyzer designed as a technical showcase in embedded systems, hardware design, and user interface development. The project blends sensor-based measurement with fun, social features, making it equally suitable for experimentation, learning, and demonstration purposes.
 
 The device measures alcohol concentration using a semiconductor-based ethanol sensor and presents the result directly on an onboard OLED display. Users can create profiles, view measurement history, and interact with various party-oriented game modes that run entirely on the device. The goal is to turn breathalyzer measurements into a social experience rather than a purely functional one.
 
