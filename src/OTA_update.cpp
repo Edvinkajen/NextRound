@@ -1,4 +1,4 @@
-#include "ota.h"
+#include "OTA.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -8,7 +8,7 @@ extern "C" {
   #include "esp_ota_ops.h"
 }
 
-namespace NextRoundOTA {
+namespace OTA_update {
 
   static WebServer server(80);
   static volatile bool g_done = false;
@@ -65,8 +65,8 @@ namespace NextRoundOTA {
   // Minimal HTML upload page
   static const char* kIndexHtml =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>NR Firmware Update</title></head><body style='font-family:sans-serif;max-width:720px;margin:24px;'>"
-    "<h2>NR Firmware Update</h2>"
+    "<title>Firmware Update</title></head><body style='font-family:sans-serif;max-width:720px;margin:24px;'>"
+    "<h2>Firmware Update</h2>"
     "<p>Select a <b>.bin</b> firmware file and upload.</p>"
     "<form method='POST' action='/update' enctype='multipart/form-data'>"
     "<input type='file' name='firmware' accept='.bin' required style='width:100%;padding:8px;'/><br><br>"
@@ -175,12 +175,15 @@ namespace NextRoundOTA {
 
     // Reset WiFi into clean state
     WiFi.persistent(false);
+    WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
-    delay(150);
+    delay(200);
 
+    WiFi.setHostname("NR_Update");
     WiFi.mode(WIFI_AP);
-    bool ap_ok = WiFi.softAP("NR_Update"); // open network
-    delay(150);
+    WiFi.setSleep(false);
+    bool ap_ok = WiFi.softAP("NR_Update", "123456789", 6, 0, 4, false); // 2.4 GHz, channel 1, open
+    delay(200);
 
     if (!ap_ok) {
       setStatus("SoftAP failed");
@@ -216,7 +219,7 @@ namespace NextRoundOTA {
         uiDraw(u8g2, "WiFi: NR_Update", g_status, percent);
       }
 
-      delay(2);
+      //delay(2);
       yield();
     }
 

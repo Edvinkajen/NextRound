@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 
-namespace NextRoundOTA {
+namespace OTA_update {
 
   // Call this once early in normal firmware *after* your self-test passes.
   // This confirms the currently running app as "valid" and cancels rollback.

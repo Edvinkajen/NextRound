@@ -13,7 +13,7 @@
 #include "qrcode_bitmap.h"
 #include "pins.h"
 #include "minigames.h"
-#include "ota_update.cpp"
+#include "OTA.h"
 
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kButtonLongPressMs = 800;
@@ -21,6 +21,7 @@ constexpr uint32_t kButtonExtraLongMs = 7000;
 constexpr uint32_t kUiTickMs = 30;
 constexpr uint32_t kSleepCountdownMs = 3000;
 constexpr uint32_t kResetCountdownMs = 10000;
+constexpr uint32_t kOtaCountdownMs = 5000;
 constexpr uint16_t kSleepTimeoutMinSec = 0;
 constexpr uint16_t kSleepTimeoutMaxSec = 900;
 constexpr uint16_t kSleepTimeoutStepSec = 30;
@@ -125,6 +126,8 @@ uint8_t wifiBleMenuIndex = 0;
 bool settingsDirty = false;
 bool resetPending = false;
 uint32_t resetStartMs = 0;
+bool otaPending = false;
+uint32_t otaStartMs = 0;
 const char kUsersFile[] = "/users.json";
 bool rouletteEnabled = false;
 RussianRoulette roulette;
@@ -802,6 +805,42 @@ void renderResetCountdown(uint32_t nowMs) {
   display.sendBuffer();
 }
 
+void startOtaCountdown(uint32_t nowMs) {
+  otaPending = true;
+  otaStartMs = nowMs;
+}
+
+void cancelOtaCountdown() {
+  otaPending = false;
+}
+
+void renderOtaCountdown(uint32_t nowMs) {
+  uint32_t remainingMs = 0;
+  if (nowMs < otaStartMs + kOtaCountdownMs) {
+    remainingMs = (otaStartMs + kOtaCountdownMs) - nowMs;
+  }
+  const uint8_t secondsLeft = static_cast<uint8_t>((remainingMs + 999) / 1000);
+
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  display.setDrawColor(0);
+  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
+  display.setDrawColor(1);
+
+  display.setFont(u8g2_font_9x15_tf);
+  display.setCursor(14, kMenuTop + 20);
+  display.print("Firmware Update");
+
+  char buffer[8];
+  snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
+  display.setFont(u8g2_font_6x10_tf);
+  const uint8_t countWidth = display.getStrWidth(buffer);
+  const uint8_t countX = (kDisplayWidth - countWidth) / 2;
+  display.setCursor(countX, kMenuTop + 38);
+  display.print(buffer);
+  display.sendBuffer();
+}
+
 void renderWifiBleMenu(uint8_t selectedIndex) {
   display.clearBuffer();
   ui.renderStatusBar(appState);
@@ -1049,7 +1088,7 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_FAULT_BUTTON, INPUT_PULLUP);
 
-  ota_update::markAppValidCancelRollback();
+  OTA_update::markAppValidCancelRollback();
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   scanI2c();
@@ -1118,6 +1157,17 @@ void loop() {
       resetPending = false;
     } else {
       renderResetCountdown(nowMs);
+    }
+    return;
+  }
+  if (otaPending) {
+    if (shortPress || longPress || extraLongPress) {
+      cancelOtaCountdown();
+    } else if (nowMs - otaStartMs >= kOtaCountdownMs) {
+      otaPending = false;
+      OTA_update::enterUpdateModeBlocking(display);
+    } else {
+      renderOtaCountdown(nowMs);
     }
     return;
   }
@@ -1346,6 +1396,10 @@ void loop() {
       }
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingResetIndex) {
         startResetCountdown(nowMs);
+        return;
+      }
+      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaIndex) {
+        startOtaCountdown(nowMs);
         return;
       }
       if (submenuIndex == 0) {
