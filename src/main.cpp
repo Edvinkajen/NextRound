@@ -130,6 +130,9 @@ uint32_t resetStartMs = 0;
 bool otaPending = false;
 uint32_t otaStartMs = 0;
 const char kUsersFile[] = "/users.json";
+const char kFwInfoFile[] = "/fw_info.txt";
+bool fwUpdatePending = false;
+char fwPrevVersion[16] = "unknown";
 bool rouletteEnabled = false;
 RussianRoulette roulette;
 enum class RoulettePhase : uint8_t { Idle, ShowPromille, ShowResult };
@@ -196,6 +199,11 @@ const uint8_t kIconHeating[] = {
     0x08, 0x44, 0x04, 0x44, 0x04, 0x88, 0x08, 0x10, 0x11, 0x20, 0x22,
     0x20, 0x22, 0x10, 0x11, 0x88, 0x08, 0x00, 0x00, 0xfe, 0x7f,
 };
+const uint8_t kIconBlow[] = {
+    0x00, 0x00, 0xc0, 0x03, 0x20, 0x3c, 0x20, 0x64, 0x00, 0x41, 0xf0,
+    0x50, 0x0f, 0x58, 0x00, 0x40, 0xff, 0x21, 0x00, 0x38, 0x0f, 0x40,
+    0xf0, 0x50, 0x00, 0x49, 0x20, 0x30, 0x20, 0x0c, 0xc0, 0x03
+};
 
 void renderMeasurement(uint32_t nowMs) {
   display.clearBuffer();
@@ -211,7 +219,10 @@ void renderMeasurement(uint32_t nowMs) {
   display.setFont(u8g2_font_9x15_tf);
   const uint8_t titleWidth = display.getStrWidth(title);
   const uint8_t titleX = (kDisplayWidth - titleWidth) / 2;
-  const uint8_t titleY = kMenuTop + 20;
+  uint8_t titleY = kMenuTop + 20;
+  if (!heating) {
+    titleY = static_cast<uint8_t>(titleY + 4);
+  }
   display.setCursor(titleX, titleY);
   display.print(title);
 
@@ -238,6 +249,19 @@ void renderMeasurement(uint32_t nowMs) {
     const uint8_t countX = (kDisplayWidth - countWidth) / 2;
     display.setCursor(countX, kMenuTop + 40);
     display.print(buffer);
+  } else {
+    const uint8_t iconY = static_cast<uint8_t>(kMenuTop + 11);
+    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 14;
+    const int16_t rightX =
+        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 14;
+    display.setDrawColor(1);
+    display.setBitmapMode(1);
+    if (leftX >= 0) {
+      display.drawXBMP(static_cast<uint8_t>(leftX), iconY, kIcon16, kIcon16, kIconBlow);
+    }
+    if (rightX + kIcon16 <= kDisplayWidth) {
+      display.drawXBMP(static_cast<uint8_t>(rightX), iconY, kIcon16, kIcon16, kIconBlow);
+    }
   }
 
   display.sendBuffer();
@@ -265,6 +289,51 @@ void renderQrCode() {
   display.setCursor(textX, textY);
   display.print("Date ");
   display.print(kBuildDate);
+
+  display.sendBuffer();
+}
+
+bool loadStoredFirmwareVersion(char *out, size_t outSize) {
+  if (!LittleFS.exists(kFwInfoFile)) {
+    return false;
+  }
+  File file = LittleFS.open(kFwInfoFile, "r");
+  if (!file) {
+    return false;
+  }
+  size_t n = file.readBytesUntil('\n', out, outSize - 1);
+  out[n] = '\0';
+  file.close();
+  return n > 0;
+}
+
+void saveStoredFirmwareVersion(const char *version) {
+  File file = LittleFS.open(kFwInfoFile, "w");
+  if (!file) {
+    return;
+  }
+  file.print(version);
+  file.close();
+}
+
+void renderFwUpdateComplete() {
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x10_tf);
+  const char title[] = "FW Update complete";
+  const uint8_t titleWidth = display.getStrWidth(title);
+  const uint8_t titleX = (kDisplayWidth - titleWidth) / 2;
+  const uint8_t contentTop = kMenuTop;
+  const uint8_t contentHeight = kDisplayHeight - kMenuTop;
+  const uint8_t centerY = contentTop + contentHeight / 2;
+  display.setCursor(titleX, static_cast<uint8_t>(centerY - 8));
+  display.print(title);
+
+  char versions[40];
+  snprintf(versions, sizeof(versions), "V%s -> V%s", fwPrevVersion, kFirmwareVersion);
+  const uint8_t verWidth = display.getStrWidth(versions);
+  const uint8_t verX = (kDisplayWidth - verWidth) / 2;
+  display.setCursor(verX, static_cast<uint8_t>(centerY + 8));
+  display.print(versions);
 
   display.sendBuffer();
 }
@@ -1119,6 +1188,16 @@ void setup() {
     applyDefaultSettings();
     saveSettings();
   }
+  char storedVersion[sizeof(fwPrevVersion)] = "";
+  if (loadStoredFirmwareVersion(storedVersion, sizeof(storedVersion))) {
+    if (strcmp(storedVersion, kFirmwareVersion) != 0) {
+      strncpy(fwPrevVersion, storedVersion, sizeof(fwPrevVersion) - 1);
+      fwPrevVersion[sizeof(fwPrevVersion) - 1] = '\0';
+      fwUpdatePending = true;
+    }
+  } else {
+    saveStoredFirmwareVersion(kFirmwareVersion);
+  }
   roulette.reset();
   duel.disable();
   randomSeed(micros());
@@ -1142,6 +1221,15 @@ void loop() {
       enterDeepSleep();
     } else {
       renderSleepCountdown(nowMs);
+    }
+    return;
+  }
+  if (fwUpdatePending) {
+    if (shortPress || longPress || extraLongPress) {
+      saveStoredFirmwareVersion(kFirmwareVersion);
+      fwUpdatePending = false;
+    } else {
+      renderFwUpdateComplete();
     }
     return;
   }
