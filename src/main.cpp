@@ -14,6 +14,7 @@
 #include "pins.h"
 #include "minigames.h"
 #include "OTA.h"
+#include "device_info.h"
 
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kButtonLongPressMs = 800;
@@ -255,13 +256,15 @@ void renderQrCode() {
   display.print("Alkoblas V2");
   textY += 12;
   display.setCursor(textX, textY);
-  display.print("HW Rev A");
+  display.print(kHardwareRev);
   textY += 12;
   display.setCursor(textX, textY);
-  display.print("Firm: 1.0.0");
+  display.print("Firm: ");
+  display.print(kFirmwareVersion);
   textY += 12;
   display.setCursor(textX, textY);
-  display.print("Date Q1-26");
+  display.print("Date ");
+  display.print(kBuildDate);
 
   display.sendBuffer();
 }
@@ -828,7 +831,7 @@ void renderOtaCountdown(uint32_t nowMs) {
   display.setDrawColor(1);
 
   display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(24, kMenuTop + 20);
+  display.setCursor(25, kMenuTop + 20);
   display.print("FW Update");
 
   char buffer[8];
