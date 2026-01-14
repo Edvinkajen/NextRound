@@ -1,8 +1,11 @@
 #include "OTA.h"
+#include "pins.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <esp_system.h>
+#include <qrcode.h>
 
 extern "C" {
   #include "esp_ota_ops.h"
@@ -18,6 +21,12 @@ namespace OTA_update {
 
   static uint32_t g_total = 0;
   static uint32_t g_written = 0;
+  static char g_ssid[16] = "NR_Update";
+  static char g_pass[16] = "nr_update";
+  static char g_qrText[96] = "";
+  static QRCode g_qr;
+  static uint8_t g_qrData[256];
+  static bool g_qrReady = false;
 
   static void setStatus(const char* s) {
     strncpy(g_status, s, sizeof(g_status) - 1);
@@ -28,27 +37,50 @@ namespace OTA_update {
 
   // --- UI helpers (U8g2) ---
   static void uiDraw(U8G2& u8g2, const char* line1, const char* line2, int percent) {
+    (void)line1;
+    (void)line2;
+    (void)percent;
     u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.setFont(u8g2_font_5x8_tf);
+    u8g2.drawStr(0, 12, "1. Scan QR");
+    u8g2.drawStr(0, 28, "2. Go to");
+    u8g2.drawStr(0, 38, "192.168.4.1");
+    u8g2.drawStr(0, 54, "3. Upload");
 
-    u8g2.drawStr(0, 12, "NR Update Mode");
-    u8g2.drawHLine(0, 14, 128);
-
-    if (line1) u8g2.drawStr(0, 28, line1);
-    if (line2) u8g2.drawStr(0, 40, line2);
-
-    // progress bar
-    u8g2.drawFrame(0, 52, 128, 10);
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-    int w = (128 * percent) / 100;
-    u8g2.drawBox(0, 52, w, 10);
-
-    char pbuf[24];
-    snprintf(pbuf, sizeof(pbuf), "%d%%", percent);
-    u8g2.drawStr(104, 50, pbuf);
-
+    if (g_qrReady) {
+      const uint8_t scale = 2;
+      const uint8_t size = g_qr.size;
+      const uint16_t qrSizePx = static_cast<uint16_t>(size) * scale;
+      const uint8_t qrBox = 64;
+      const uint16_t x0 = 128 - qrBox + (qrBox - qrSizePx) / 2;
+      const uint16_t y0 = (64 - qrSizePx) / 2;
+      for (uint8_t y = 0; y < size; ++y) {
+        for (uint8_t x = 0; x < size; ++x) {
+          if (qrcode_getModule(&g_qr, x, y)) {
+            u8g2.drawBox(x0 + x * scale, y0 + y * scale, scale, scale);
+          }
+        }
+      }
+    }
     u8g2.sendBuffer();
+  }
+
+  static void generateApCredentials() {
+    const uint32_t r1 = esp_random();
+    const uint32_t r2 = esp_random();
+    snprintf(g_ssid, sizeof(g_ssid), "NR_%02X%02X%02X",
+             static_cast<unsigned int>(r1 & 0xFF),
+             static_cast<unsigned int>((r1 >> 8) & 0xFF),
+             static_cast<unsigned int>((r1 >> 16) & 0xFF));
+    snprintf(g_pass, sizeof(g_pass), "%02X%02X%02X%02X%02X%02X",
+             static_cast<unsigned int>(r2 & 0xFF),
+             static_cast<unsigned int>((r2 >> 8) & 0xFF),
+             static_cast<unsigned int>((r2 >> 16) & 0xFF),
+             static_cast<unsigned int>((r2 >> 24) & 0xFF),
+             static_cast<unsigned int>(r1 & 0xFF),
+             static_cast<unsigned int>((r1 >> 8) & 0xFF));
+    snprintf(g_qrText, sizeof(g_qrText), "WIFI:T:WPA;S:%s;P:%s;H:true;;",
+             g_ssid, g_pass);
   }
 
   bool markAppValidCancelRollback() {
@@ -173,16 +205,21 @@ namespace OTA_update {
     // - You should stop BLE/sensors/logging in your main firmware BEFORE calling this.
     // - Here we only handle WiFi + WebServer + minimal UI.
 
+    generateApCredentials();
+    qrcode_initText(&g_qr, g_qrData, 3, ECC_LOW, g_qrText);
+    g_qrReady = false;
+
     // Reset WiFi into clean state
     WiFi.persistent(false);
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
     delay(200);
 
-    WiFi.setHostname("NR_Update");
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    bool ap_ok = WiFi.softAP("NR_Update", "123456789", 6, 0, 4, false); // 2.4 GHz, channel 1, open
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.setHostname(g_ssid);
+    bool ap_ok = WiFi.softAP(g_ssid, g_pass, 1, 1, 4, false);
     delay(200);
 
     if (!ap_ok) {
@@ -191,6 +228,7 @@ namespace OTA_update {
       return;
     }
 
+    g_qrReady = true;
     IPAddress ip = WiFi.softAPIP();
 
     // Web server
@@ -203,13 +241,30 @@ namespace OTA_update {
     uiDraw(u8g2, "WiFi: NR_Update", "Open: 192.168.4.1", 0);
 
     uint32_t lastUi = 0;
+    uint32_t cancelStartMs = 0;
+    bool cancelHeld = false;
 
     while (!g_done) {
       server.handleClient();
 
       // UI refresh (10 Hz)
       uint32_t now = millis();
-      if (now - lastUi > 100) {
+      const bool buttonHeld = digitalRead(PIN_BUTTON) == LOW;
+      if (buttonHeld) {
+        if (!cancelHeld) {
+          cancelHeld = true;
+          cancelStartMs = now;
+        } else if (now - cancelStartMs >= 20000) {
+          setStatus("Update canceled");
+          g_success = false;
+          g_done = true;
+          break;
+        }
+      } else {
+        cancelHeld = false;
+      }
+
+      if (now - lastUi > 25) {
         lastUi = now;
 
         int percent = 0;
@@ -219,7 +274,7 @@ namespace OTA_update {
         uiDraw(u8g2, "WiFi: NR_Update", g_status, percent);
       }
 
-      //delay(2);
+      delay(2);
       yield();
     }
 

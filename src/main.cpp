@@ -77,7 +77,7 @@ const char *const kSettingsMenuItems[] = {
     "WIFI/BLE",
     "Sensor",
     "OFF Timer",
-    "Firmware Update",
+    "FW Update",
     "Reset",
 };
 constexpr uint8_t kSettingCalibIndex = 1;
@@ -828,8 +828,8 @@ void renderOtaCountdown(uint32_t nowMs) {
   display.setDrawColor(1);
 
   display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(14, kMenuTop + 20);
-  display.print("Firmware Update");
+  display.setCursor(24, kMenuTop + 20);
+  display.print("FW Update");
 
   char buffer[8];
   snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
