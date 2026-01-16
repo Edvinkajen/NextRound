@@ -113,8 +113,6 @@ bool showingQr = false;
 bool inWifiBleMenu = false;
 ButtonState button;
 uint32_t lastUiTickMs = 0;
-bool faultButtonLast = true;
-uint32_t faultButtonLastMs = 0;
 bool measuringActive = false;
 uint32_t measureStartMs = 0;
 bool sleepPending = false;
@@ -1177,12 +1175,12 @@ void enterDeepSleep() {
     delay(10);
   }
   delay(50);
-  // Note: ESP32-C3 deep sleep wake only works on GPIO0-5.
+  // Note: Deep sleep wake requires RTC-capable GPIOs.
   const gpio_num_t wakeGpio = static_cast<gpio_num_t>(PIN_BUTTON);
   gpio_pullup_en(wakeGpio);
   gpio_pulldown_dis(wakeGpio);
   const uint64_t wakeMask = (1ULL << static_cast<uint64_t>(wakeGpio));
-  esp_deep_sleep_enable_gpio_wakeup(wakeMask, ESP_GPIO_WAKEUP_GPIO_LOW);
+  esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
   if (duelEnabled) {
     const time_t now = time(nullptr);
     if (now > 0 && duel.nextTime() > now) {
@@ -1241,7 +1239,6 @@ void setup() {
   Serial.println(static_cast<int>(esp_reset_reason()));
   delay(200);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
-  pinMode(PIN_FAULT_BUTTON, INPUT_PULLUP);
 
   OTA_update::markAppValidCancelRollback();
 
@@ -1607,16 +1604,6 @@ void loop() {
 
   if (extraLongPress) {
     enterDeepSleep();
-  }
-
-  const bool faultLevel = digitalRead(PIN_FAULT_BUTTON) == LOW;
-  if (faultLevel != faultButtonLast) {
-    faultButtonLastMs = nowMs;
-    faultButtonLast = faultLevel;
-  } else if (faultLevel && (nowMs - faultButtonLastMs) > kButtonDebounceMs) {
-    appState.chargerFaultReason = appState.chargerFaultReason == 0 ? 1 : 0;
-    appState.chargerTsFault = appState.chargerTsFault == 2 ? 1 : 2;
-    faultButtonLast = false;
   }
 
   if (nowMs - lastUiTickMs >= kUiTickMs) {
