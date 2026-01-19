@@ -12,6 +12,8 @@
 #include "ui.h"
 #include "qrcode_bitmap.h"
 #include "pins.h"
+#include "actuators.h"
+#include "measurement.h"
 #include "minigames.h"
 #include "OTA.h"
 #include "device_info.h"
@@ -37,6 +39,20 @@ constexpr uint32_t kMeasureCountdownSec = 20;
 constexpr uint32_t kRoulettePromilleMs = 3000;
 constexpr uint32_t kRouletteResultMs = 3000;
 constexpr uint32_t kDuelResultMs = 5000;
+constexpr uint8_t kPwmChannelBuzzer = 0;
+constexpr uint8_t kPwmChannelVib = 1;
+constexpr uint8_t kPwmChannelHeater = 2;
+constexpr uint32_t kHeaterPwmHz = 2000;
+constexpr uint8_t kHeaterPercent = 75;
+constexpr uint32_t kBlowHoldMs = 5000;
+constexpr uint32_t kMicGraceMs = 300;
+constexpr uint32_t kRetryMessageMs = 1500;
+constexpr uint8_t kMicBuzzerStrength = 50;
+constexpr uint32_t kBuzzerPwmHz = 2000;
+constexpr uint32_t kVibPwmHz = 20000;
+constexpr uint8_t kDefaultNeopixelR = 200;
+constexpr uint8_t kDefaultNeopixelG = 60;
+constexpr uint8_t kDefaultNeopixelB = 130;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
 Ui ui(display);
@@ -114,7 +130,6 @@ bool inWifiBleMenu = false;
 ButtonState button;
 uint32_t lastUiTickMs = 0;
 bool measuringActive = false;
-uint32_t measureStartMs = 0;
 bool sleepPending = false;
 uint32_t sleepStartMs = 0;
 bool adjustingSetting = false;
@@ -149,6 +164,11 @@ float duelMeasA = 0.0f;
 float duelMeasB = 0.0f;
 uint16_t sleepTimeoutSec = 300;
 uint32_t lastInteractionMs = 0;
+Buzzer buzzer(PIN_BUZZER, kPwmChannelBuzzer, kBuzzerPwmHz);
+VibrationMotor vib(PIN_VIB, kPwmChannelVib, kVibPwmHz);
+NeopixelLed neopixel(PIN_LED);
+MeasurementController measurement(PIN_HEATER, kPwmChannelHeater, PIN_MIC, PIN_ALC_SENSOR,
+                                  kHeaterPwmHz);
 
 
 void scanI2c() {
@@ -248,16 +268,16 @@ const uint8_t kIconBlow[] = {
     0xf0, 0x50, 0x00, 0x49, 0x20, 0x30, 0x20, 0x0c, 0xc0, 0x03
 };
 
-void renderMeasurement(uint32_t nowMs) {
+void renderMeasurement(const MeasurementController &measurement, uint32_t nowMs) {
   display.clearBuffer();
   ui.renderStatusBar(appState);
   display.setDrawColor(0);
   display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
   display.setDrawColor(1);
 
-  const uint32_t elapsedMs = nowMs - measureStartMs;
-  const bool heating = elapsedMs < kMeasureCountdownSec * 1000UL;
-  const char *title = heating ? "Heating" : "Blow";
+  const bool heating = measurement.phase() == MeasurementController::Phase::Heating;
+  const bool retry = measurement.isRetry();
+  const char *title = retry ? "Retry" : (heating ? "Heating" : "Blow");
 
   display.setFont(u8g2_font_9x15_tf);
   const uint8_t titleWidth = display.getStrWidth(title);
@@ -283,7 +303,7 @@ void renderMeasurement(uint32_t nowMs) {
       display.drawXBMP(static_cast<uint8_t>(rightX), iconY, kIcon16, kIcon16, kIconHeating);
     }
 
-    const uint32_t remainingMs = kMeasureCountdownSec * 1000UL - elapsedMs;
+    const uint32_t remainingMs = measurement.heatingRemainingMs(nowMs);
     const uint32_t remainingSec = (remainingMs + 999) / 1000;
     char buffer[8];
     snprintf(buffer, sizeof(buffer), "%lu", static_cast<unsigned long>(remainingSec));
@@ -744,6 +764,21 @@ void applyDefaultSettings() {
   sleepTimeoutSec = 300;
 }
 
+void applyActuatorLevels() {
+  neopixel.setLevel(settingValues[0]);
+  buzzer.setLevel(settingValues[1]);
+  vib.setLevel(settingValues[2]);
+}
+
+void applyMicThresholdFromSetting() {
+  const uint32_t minThresh = 300u;
+  const uint32_t maxThresh = 3500u;
+  const uint32_t scaled =
+      (static_cast<uint32_t>(settingSensValue) * (maxThresh - minThresh)) / 25u;
+  const uint16_t threshold = static_cast<uint16_t>(minThresh + scaled);
+  measurement.setMicThreshold(threshold);
+}
+
 void saveSettings() {
   JsonDocument doc;
   doc["led"] = settingValues[0];
@@ -1170,6 +1205,8 @@ void renderSleepCountdown(uint32_t nowMs) {
 void enterDeepSleep() {
   display.clearBuffer();
   display.sendBuffer();
+  neopixel.off();
+  digitalWrite(PIN_5V_EN, LOW);
   // Wait for button release so sleep doesn't instantly wake.
   while (digitalRead(PIN_BUTTON) == LOW) {
     delay(10);
@@ -1239,6 +1276,14 @@ void setup() {
   Serial.println(static_cast<int>(esp_reset_reason()));
   delay(200);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+  pinMode(PIN_5V_EN, OUTPUT);
+  digitalWrite(PIN_5V_EN, HIGH);
+  pinMode(PIN_LED, OUTPUT);
+  delay(100);
+  buzzer.begin();
+  vib.begin();
+  neopixel.begin();
+  measurement.begin();
 
   OTA_update::markAppValidCancelRollback();
 
@@ -1268,6 +1313,15 @@ void setup() {
     applyDefaultSettings();
     saveSettings();
   }
+  applyActuatorLevels();
+  applyMicThresholdFromSetting();
+  measurement.setHeaterPercent(kHeaterPercent);
+  measurement.setHeatingMs(kMeasureCountdownSec * 1000UL);
+  measurement.setBlowHoldMs(kBlowHoldMs);
+  measurement.setMicGraceMs(kMicGraceMs);
+  measurement.setRetryDisplayMs(kRetryMessageMs);
+  measurement.setBuzzerStrength(kMicBuzzerStrength);
+  neopixel.onColor(kDefaultNeopixelR, kDefaultNeopixelG, kDefaultNeopixelB);
   char storedVersion[sizeof(fwPrevVersion)] = "";
   if (loadStoredFirmwareVersion(storedVersion, sizeof(storedVersion))) {
     if (strcmp(storedVersion, kFirmwareVersion) != 0) {
@@ -1286,12 +1340,15 @@ void setup() {
 
 void loop() {
   const uint32_t nowMs = millis();
+  buzzer.update(nowMs);
+  vib.update(nowMs);
   bool shortPress = false;
   bool longPress = false;
   bool extraLongPress = false;
   updateButton(nowMs, shortPress, longPress, extraLongPress);
   if (shortPress || longPress || extraLongPress) {
     lastInteractionMs = nowMs;
+    vib.onFor(50, 100);
   }
 
   if (sleepPending) {
@@ -1426,9 +1483,15 @@ void loop() {
   uint8_t *activeIndex = &mainMenuIndex;
 
   if (measuringActive) {
+    measurement.update(nowMs, buzzer);
+    if (measurement.isComplete()) {
+      appState.lastMeasurement = static_cast<float>(measurement.alcValue()) / 1000.0f;
+      measurement.stop();
+      measuringActive = false;
+      return;
+    }
     if (rouletteEnabled) {
-      const uint32_t elapsedMs = nowMs - measureStartMs;
-      if (elapsedMs >= kMeasureCountdownSec * 1000UL && (shortPress || longPress)) {
+      if (measurement.isBlowPhase() && (shortPress || longPress)) {
         bool allowRoulette = true;
         JsonDocument doc;
         if (loadUsers(doc)) {
@@ -1441,16 +1504,19 @@ void loop() {
           rouletteLastHit = roulette.fire();
           roulettePhase = RoulettePhase::ShowPromille;
           roulettePhaseStartMs = nowMs;
+          measurement.stop();
           measuringActive = false;
           return;
         }
       }
     }
     if (shortPress || longPress) {
+      measurement.stop();
+      buzzer.off();
       measuringActive = false;
       return;
     }
-    renderMeasurement(nowMs);
+    renderMeasurement(measurement, nowMs);
     if (!extraLongPress) {
       return;
     }
@@ -1468,7 +1534,9 @@ void loop() {
   if (adjustingSetting) {
     if (shortPress) {
       if (adjustingSettingSlot == 3) {
-        settingSensValue = static_cast<uint8_t>((settingSensValue + 1) % 26);
+        settingSensValue =
+            static_cast<uint8_t>(settingSensValue >= 25 ? 1 : (settingSensValue + 1));
+        applyMicThresholdFromSetting();
       } else if (adjustingSettingSlot == 4) {
         uint16_t next = static_cast<uint16_t>(sleepTimeoutSec + kSleepTimeoutStepSec);
         if (next > kSleepTimeoutMaxSec) {
@@ -1478,6 +1546,7 @@ void loop() {
       } else {
         settingValues[adjustingSettingSlot] =
             static_cast<uint8_t>((settingValues[adjustingSettingSlot] + 1) % 11);
+        applyActuatorLevels();
       }
       settingsDirty = true;
     }
@@ -1586,7 +1655,7 @@ void loop() {
       return;
     } else if (mainMenuIndex == 0) {
       measuringActive = true;
-      measureStartMs = nowMs;
+      measurement.start(nowMs);
       return;
     } else if (hasSubmenuForMain(mainMenuIndex)) {
       inSubmenu = true;
