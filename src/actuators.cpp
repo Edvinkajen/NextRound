@@ -275,9 +275,7 @@ bool Buzzer::isActive() const {
 }
 
 void Buzzer::write(bool enabled) {
-  const uint8_t effectivePercent =
-      overrideLevel_ ? scalePercent(baseLevelPercent_, commandLevelPercent_)
-                     : baseLevelPercent_;
+  const uint8_t effectivePercent = 50;
   uint32_t duty =
       enabled ? (static_cast<uint32_t>(effectivePercent) * kPwmMaxDuty) / 100u : 0u;
   if (!activeHigh_) {
