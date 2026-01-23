@@ -48,7 +48,14 @@ constexpr uint32_t kBlowHoldMs = 5000;
 constexpr uint32_t kMicGraceMs = 300;
 constexpr uint32_t kRetryMessageMs = 1500;
 constexpr uint8_t kMicBuzzerStrength = 50;
-constexpr uint32_t kBuzzerPwmHz = 2000;
+constexpr uint8_t kHeatingDoneVibCount = 3;
+constexpr uint32_t kHeatingDoneVibOnMs = 120;
+constexpr uint32_t kHeatingDoneVibOffMs = 120;
+constexpr uint32_t kMeasurementDoneVibMs = 200;
+constexpr uint8_t kMeasurementVibStrength = 100;
+constexpr uint16_t kBuzzerTestToneHz = 2000;
+constexpr uint32_t kBuzzerTestDurationMs = 500;
+constexpr uint32_t kBuzzerPwmHz = 2700;
 constexpr uint32_t kVibPwmHz = 20000;
 constexpr uint8_t kDefaultNeopixelR = 200;
 constexpr uint8_t kDefaultNeopixelG = 60;
@@ -91,6 +98,7 @@ const char *const kSettingsMenuItems[] = {
     "LED",
     "Buzzer",
     "Vibration",
+    "Buzzer Test",
     "WIFI/BLE",
     "Sensor",
     "OFF Timer",
@@ -101,11 +109,12 @@ constexpr uint8_t kSettingCalibIndex = 1;
 constexpr uint8_t kSettingLedIndex = 2;
 constexpr uint8_t kSettingBuzzIndex = 3;
 constexpr uint8_t kSettingVibIndex = 4;
-constexpr uint8_t kSettingWifiBleIndex = 5;
-constexpr uint8_t kSettingSensIndex = 6;
-constexpr uint8_t kSettingSleepIndex = 7;
-constexpr uint8_t kSettingOtaIndex = 8;
-constexpr uint8_t kSettingResetIndex = 9;
+constexpr uint8_t kSettingBuzzTestIndex = 5;
+constexpr uint8_t kSettingWifiBleIndex = 6;
+constexpr uint8_t kSettingSensIndex = 7;
+constexpr uint8_t kSettingSleepIndex = 8;
+constexpr uint8_t kSettingOtaIndex = 9;
+constexpr uint8_t kSettingResetIndex = 10;
 
 const char *const kWifiBleMenuItems[] = {
     "Return",
@@ -130,6 +139,7 @@ bool inWifiBleMenu = false;
 ButtonState button;
 uint32_t lastUiTickMs = 0;
 bool measuringActive = false;
+MeasurementController::Phase lastMeasurementPhase = MeasurementController::Phase::Idle;
 bool sleepPending = false;
 uint32_t sleepStartMs = 0;
 bool adjustingSetting = false;
@@ -142,6 +152,9 @@ bool resetPending = false;
 uint32_t resetStartMs = 0;
 bool otaPending = false;
 uint32_t otaStartMs = 0;
+bool buzzerTestActive = false;
+uint32_t buzzerTestEndMs = 0;
+uint8_t buzzerTestPrevLevel = 0;
 const char kUsersFile[] = "/users.json";
 const char kFwInfoFile[] = "/fw_info.txt";
 bool fwUpdatePending = false;
@@ -665,6 +678,9 @@ void renderSubmenuWithReturnIcon(const char *const *menuItems, size_t menuCount,
         case kSettingVibIndex:
           icon = kIconVibration;
           break;
+        case kSettingBuzzTestIndex:
+          icon = kIconBuzzer;
+          break;
         case kSettingWifiBleIndex:
           icon = kIconWifiBle;
           break;
@@ -777,6 +793,14 @@ void applyMicThresholdFromSetting() {
       (static_cast<uint32_t>(settingSensValue) * (maxThresh - minThresh)) / 25u;
   const uint16_t threshold = static_cast<uint16_t>(minThresh + scaled);
   measurement.setMicThreshold(threshold);
+}
+
+void startBuzzerTest(uint32_t nowMs) {
+  buzzerTestPrevLevel = settingValues[1];
+  buzzer.setLevel(10);
+  buzzer.playTone(kBuzzerTestToneHz, kBuzzerTestDurationMs, 100);
+  buzzerTestEndMs = nowMs + kBuzzerTestDurationMs;
+  buzzerTestActive = true;
 }
 
 void saveSettings() {
@@ -1342,6 +1366,10 @@ void loop() {
   const uint32_t nowMs = millis();
   buzzer.update(nowMs);
   vib.update(nowMs);
+  if (buzzerTestActive && static_cast<int32_t>(nowMs - buzzerTestEndMs) >= 0) {
+    buzzer.setLevel(buzzerTestPrevLevel);
+    buzzerTestActive = false;
+  }
   bool shortPress = false;
   bool longPress = false;
   bool extraLongPress = false;
@@ -1484,10 +1512,22 @@ void loop() {
 
   if (measuringActive) {
     measurement.update(nowMs, buzzer);
+    const MeasurementController::Phase currentPhase = measurement.phase();
+    if (currentPhase != lastMeasurementPhase) {
+      if (lastMeasurementPhase == MeasurementController::Phase::Heating &&
+          currentPhase == MeasurementController::Phase::Blow) {
+        vib.pulse(kHeatingDoneVibCount, kHeatingDoneVibOnMs, kHeatingDoneVibOffMs,
+                  kMeasurementVibStrength);
+      } else if (currentPhase == MeasurementController::Phase::Done) {
+        vib.onFor(kMeasurementDoneVibMs, kMeasurementVibStrength);
+      }
+      lastMeasurementPhase = currentPhase;
+    }
     if (measurement.isComplete()) {
       appState.lastMeasurement = static_cast<float>(measurement.alcValue()) / 1000.0f;
       measurement.stop();
       measuringActive = false;
+      lastMeasurementPhase = MeasurementController::Phase::Idle;
       return;
     }
     if (rouletteEnabled) {
@@ -1506,6 +1546,7 @@ void loop() {
           roulettePhaseStartMs = nowMs;
           measurement.stop();
           measuringActive = false;
+          lastMeasurementPhase = MeasurementController::Phase::Idle;
           return;
         }
       }
@@ -1514,6 +1555,7 @@ void loop() {
       measurement.stop();
       buzzer.off();
       measuringActive = false;
+      lastMeasurementPhase = MeasurementController::Phase::Idle;
       return;
     }
     renderMeasurement(measurement, nowMs);
@@ -1624,6 +1666,10 @@ void loop() {
         adjustingSettingSlot = static_cast<uint8_t>(submenuIndex - kSettingLedIndex);
         return;
       }
+      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingBuzzTestIndex) {
+        startBuzzerTest(nowMs);
+        return;
+      }
       if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingSensIndex) {
         adjustingSetting = true;
         adjustingSettingSlot = 3;
@@ -1655,6 +1701,7 @@ void loop() {
       return;
     } else if (mainMenuIndex == 0) {
       measuringActive = true;
+      lastMeasurementPhase = MeasurementController::Phase::Heating;
       measurement.start(nowMs);
       return;
     } else if (hasSubmenuForMain(mainMenuIndex)) {

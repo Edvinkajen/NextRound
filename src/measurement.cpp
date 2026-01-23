@@ -91,21 +91,23 @@ void MeasurementController::update(uint32_t nowMs, Buzzer &buzzer) {
         blowStartMs_ = nowMs;
       }
       lastAboveMs_ = nowMs;
-      buzzer.on(buzzerStrength_);
+    }
 
+    if (blowing_) {
+      buzzer.on(buzzerStrength_);
       if (nowMs - blowStartMs_ >= blowHoldMs_) {
         alcValue_ = analogRead(alcPin_);
         buzzer.off();
         phase_ = Phase::Done;
         writeHeater(false);
-      }
-    } else {
-      buzzer.off();
-      if (blowing_ && (nowMs - lastAboveMs_ > micGraceMs_)) {
+      } else if (!above && (nowMs - lastAboveMs_ > micGraceMs_)) {
+        buzzer.off();
         phase_ = Phase::Retry;
         retryUntilMs_ = nowMs + retryDisplayMs_;
         blowing_ = false;
       }
+    } else {
+      buzzer.off();
     }
   }
 }
