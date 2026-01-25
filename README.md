@@ -38,7 +38,7 @@ Main features include:
 ## Project Status
 
 > [!NOTE]
-> NextRound is an active hobby and learning project. Both hardware and firmware are under continuous development, with planned improvements and features in both hardware and software.
+> NextRound is an active hobby and learning project. Both hardware and firmware are under continuous development, with planned improvements and features.
 > ***If you come up with a good solution or a feature you'd like me to add, feel free to open a pull request and i'll take a look!***
 
 ## ToDo
