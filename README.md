@@ -38,7 +38,7 @@ Main features include:
 ## Project Status
 
 > [!NOTE]
-> NextRound is an active hobby and learning project. Both hardware and firmware are under continuous development, with planned improvements in sensor calibration, UI polish, and mobile app support.
+> NextRound is an active hobby and learning project. Both hardware and firmware are under continuous development, with planned improvements and features in both hardware and software.
 > ***If you come up with a good solution or a feature you'd like me to add, feel free to open a pull request and i'll take a look!***
 
 ## ToDo
@@ -48,7 +48,7 @@ Main features include:
 - Implement sepaerate fuel gauge ic or implement circuitry for [BatterySense](https://github.com/rlogiacco/BatterySense) by rlogiacco.
 - Implement party modes.
 - Finish mobile app.
-- Review alternatives to electret, thats not as sensitive to moisture. Hydrophobic membrane and higher sensitivity?
+- Review alternatives to electret, thats not as sensitive to moisture. Hydrophobic membrane and higher sensitivity is maybe enough?
 
 > [!WARNING]  
 > This project is intended for educational and entertainment purposes only. It is not a certified medical device and must not be used for legal or safety-critical decisions such as driving.
