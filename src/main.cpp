@@ -3,1735 +3,1021 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <esp_sleep.h>
-#include <esp_system.h>
 #include <driver/gpio.h>
 #include <LittleFS.h>
-#include <math.h>
-#include <time.h>
 
+#include "display_constants.h"
 #include "ui.h"
 #include "qrcode_bitmap.h"
 #include "pins.h"
 #include "actuators.h"
-#include "measurement.h"
-#include "minigames.h"
-#include "OTA.h"
+#include "BatteryManager.h"
+#include "wifi_server.h"
 #include "device_info.h"
 
-constexpr uint32_t kButtonDebounceMs = 30;
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t kButtonDebounceMs  = 30;
 constexpr uint32_t kButtonLongPressMs = 800;
 constexpr uint32_t kButtonExtraLongMs = 7000;
-constexpr uint32_t kUiTickMs = 30;
-constexpr uint32_t kSleepCountdownMs = 3000;
-constexpr uint32_t kResetCountdownMs = 10000;
-constexpr uint32_t kOtaCountdownMs = 5000;
-constexpr uint16_t kSleepTimeoutMinSec = 0;
-constexpr uint16_t kSleepTimeoutMaxSec = 900;
+constexpr uint32_t kUiTickMs          = 30;
+constexpr uint32_t kSleepCountdownMs  = 3000;
+constexpr uint32_t kResetCountdownMs  = 10000;
+constexpr uint32_t kWifiCountdownMs   = 3000;
+constexpr uint16_t kSleepTimeoutMinSec  = 0;
+constexpr uint16_t kSleepTimeoutMaxSec  = 900;
 constexpr uint16_t kSleepTimeoutStepSec = 30;
-constexpr uint8_t kDisplayWidth = 128;
-constexpr uint8_t kDisplayHeight = 64;
-constexpr uint8_t kStatusBarHeight = 14;
-constexpr uint8_t kNavBarHeight = 0;
-constexpr uint8_t kMenuTop = kStatusBarHeight + 2;
-constexpr uint8_t kMenuBottom = kDisplayHeight - kNavBarHeight - 2;
-constexpr uint8_t kMenuHeight = kMenuBottom - kMenuTop;
-constexpr uint32_t kMeasureCountdownSec = 20;
-constexpr uint32_t kRoulettePromilleMs = 3000;
-constexpr uint32_t kRouletteResultMs = 3000;
-constexpr uint32_t kDuelResultMs = 5000;
-constexpr uint8_t kPwmChannelBuzzer = 0;
-constexpr uint8_t kPwmChannelVib = 1;
-constexpr uint8_t kPwmChannelHeater = 2;
-constexpr uint32_t kHeaterPwmHz = 2000;
-constexpr uint8_t kHeaterPercent = 75;
-constexpr uint32_t kBlowHoldMs = 5000;
-constexpr uint32_t kMicGraceMs = 300;
-constexpr uint32_t kRetryMessageMs = 1500;
-constexpr uint8_t kMicBuzzerStrength = 50;
-constexpr uint8_t kHeatingDoneVibCount = 3;
-constexpr uint32_t kHeatingDoneVibOnMs = 120;
-constexpr uint32_t kHeatingDoneVibOffMs = 120;
-constexpr uint32_t kMeasurementDoneVibMs = 200;
-constexpr uint8_t kMeasurementVibStrength = 100;
-constexpr uint16_t kBuzzerTestToneHz = 2000;
+constexpr uint8_t  kPwmChannelBuzzer     = 0;
+constexpr uint8_t  kPwmChannelVib        = 1;
+constexpr uint32_t kBuzzerPwmHz          = 2700;
+constexpr uint32_t kVibPwmHz             = 20000;
+constexpr uint16_t kBuzzerTestToneHz     = 2000;
 constexpr uint32_t kBuzzerTestDurationMs = 500;
-constexpr uint32_t kBuzzerPwmHz = 2700;
-constexpr uint32_t kVibPwmHz = 20000;
-constexpr uint8_t kDefaultNeopixelR = 200;
-constexpr uint8_t kDefaultNeopixelG = 60;
-constexpr uint8_t kDefaultNeopixelB = 130;
+constexpr uint8_t  kDefaultNeopixelR     = 200;
+constexpr uint8_t  kDefaultNeopixelG     = 60;
+constexpr uint8_t  kDefaultNeopixelB     = 130;
 
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
-Ui ui(display);
+// ---------------------------------------------------------------------------
+// Menu data
+// ---------------------------------------------------------------------------
 
-const char *const kMenuItems[] = {
-    "Measure",
-    "History",
-    "Party",
-    "Turn OFF",
-    "Settings",
-    "About",
-};
-constexpr uint8_t kSleepMenuIndex = 3;
-constexpr uint8_t kAboutMenuIndex = 5;
-constexpr uint8_t kSettingsMenuIndex = 4;
-constexpr uint8_t kPartyMenuIndex = 2;
-
-const char *const kHistoryMenuItems[] = {
-    "Return",
-    "Latest",
-    "Week",
-};
-
-const char *const kPartyMenuItems[] = {
-    "Return",
-    "Duel Mode",
-    "Roulette",
-    "Simon Says",
-};
-constexpr uint8_t kPartyDuelIndex = 1;
-constexpr uint8_t kPartyRouletteIndex = 2;
+const char *const kMainMenuItems[]     = { "Measure", "Turn OFF", "Settings", "About" };
+constexpr uint8_t kMainMenuCount       = 4;
+constexpr uint8_t kMainMeasureIndex    = 0;
+constexpr uint8_t kMainSleepIndex      = 1;
+constexpr uint8_t kMainSettingsIndex   = 2;
+constexpr uint8_t kMainAboutIndex      = 3;
 
 const char *const kSettingsMenuItems[] = {
-    "Return",
-    "Calib",
-    "LED",
-    "Buzzer",
-    "Vibration",
-    "Buzzer Test",
-    "WIFI/BLE",
-    "Sensor",
-    "OFF Timer",
-    "FW Update",
-    "Reset",
+  "Return", "Calib", "LED", "Buzzer", "Vibration",
+  "Buzzer Test", "WIFI/BLE", "Sensor", "OFF Timer", "FW Update", "Reset"
 };
-constexpr uint8_t kSettingCalibIndex = 1;
-constexpr uint8_t kSettingLedIndex = 2;
-constexpr uint8_t kSettingBuzzIndex = 3;
-constexpr uint8_t kSettingVibIndex = 4;
+constexpr uint8_t kSettingsMenuCount    = 11;
+constexpr uint8_t kSettingCalibIndex    = 1;
+constexpr uint8_t kSettingLedIndex      = 2;
+constexpr uint8_t kSettingBuzzIndex     = 3;
+constexpr uint8_t kSettingVibIndex      = 4;
 constexpr uint8_t kSettingBuzzTestIndex = 5;
-constexpr uint8_t kSettingWifiBleIndex = 6;
-constexpr uint8_t kSettingSensIndex = 7;
-constexpr uint8_t kSettingSleepIndex = 8;
-constexpr uint8_t kSettingOtaIndex = 9;
-constexpr uint8_t kSettingResetIndex = 10;
+constexpr uint8_t kSettingWifiBleIndex  = 6;
+constexpr uint8_t kSettingSensIndex     = 7;
+constexpr uint8_t kSettingSleepIndex    = 8;
+constexpr uint8_t kSettingOtaIndex      = 9;
+constexpr uint8_t kSettingResetIndex    = 10;
 
-const char *const kWifiBleMenuItems[] = {
-    "Return",
-    "BLE",
-    "WiFi",
-};
+const char *const kWifiBleMenuItems[]  = { "Return", "BLE", "WiFi" };
+constexpr uint8_t kWifiBleMenuCount    = 3;
 
-struct ButtonState {
-  bool lastLevel = false;
-  uint32_t pressedMs = 0;
-  bool longReported = false;
-  bool extraReported = false;
-  bool pendingShort = false;
-};
-
-AppState appState;
-uint8_t mainMenuIndex = 0;
-uint8_t submenuIndex = 0;
-bool inSubmenu = false;
-bool showingQr = false;
-bool inWifiBleMenu = false;
-ButtonState button;
-uint32_t lastUiTickMs = 0;
-bool measuringActive = false;
-MeasurementController::Phase lastMeasurementPhase = MeasurementController::Phase::Idle;
-bool sleepPending = false;
-uint32_t sleepStartMs = 0;
-bool adjustingSetting = false;
-uint8_t adjustingSettingSlot = 0;
-uint8_t settingValues[3] = {5, 5, 5};
-uint8_t settingSensValue = 10;
-uint8_t wifiBleMenuIndex = 0;
-bool settingsDirty = false;
-bool resetPending = false;
-uint32_t resetStartMs = 0;
-bool otaPending = false;
-uint32_t otaStartMs = 0;
-bool buzzerTestActive = false;
-uint32_t buzzerTestEndMs = 0;
-uint8_t buzzerTestPrevLevel = 0;
-const char kUsersFile[] = "/users.json";
-const char kFwInfoFile[] = "/fw_info.txt";
-bool fwUpdatePending = false;
-char fwPrevVersion[16] = "unknown";
-bool rouletteEnabled = false;
-RussianRoulette roulette;
-enum class RoulettePhase : uint8_t { Idle, ShowPromille, ShowResult };
-RoulettePhase roulettePhase = RoulettePhase::Idle;
-uint32_t roulettePhaseStartMs = 0;
-bool rouletteLastHit = false;
-bool duelEnabled = false;
-DuelMode duel;
-enum class DuelPhase : uint8_t { Idle, Versus, FirstStart, SecondStart, ShowResult };
-DuelPhase duelPhase = DuelPhase::Idle;
-uint32_t duelPhaseStartMs = 0;
-String duelMessage;
-String duelUserA;
-String duelUserB;
-float duelMeasA = 0.0f;
-float duelMeasB = 0.0f;
-uint16_t sleepTimeoutSec = 300;
-uint32_t lastInteractionMs = 0;
-Buzzer buzzer(PIN_BUZZER, kPwmChannelBuzzer, kBuzzerPwmHz);
-VibrationMotor vib(PIN_VIB, kPwmChannelVib, kVibPwmHz);
-NeopixelLed neopixel(PIN_LED);
-MeasurementController measurement(PIN_HEATER, kPwmChannelHeater, PIN_MIC, PIN_ALC_SENSOR,
-                                  kHeaterPwmHz);
-
-
-void scanI2c() {
-  Serial.println("I2C scan start");
-  uint8_t count = 0;
-  for (uint8_t address = 1; address < 127; ++address) {
-    Wire.beginTransmission(address);
-    if (Wire.endTransmission() == 0) {
-      Serial.print("I2C device at 0x");
-      if (address < 16) {
-        Serial.print('0');
-      }
-      Serial.println(address, HEX);
-      ++count;
-    }
-  }
-  Serial.print("I2C scan done, found ");
-  Serial.println(count);
-}
-
-bool hasSubmenuForMain(uint8_t index) {
-  return index == 1 || index == 2 || index == kSettingsMenuIndex;
-}
-
-const char *const *submenuItemsForMain(uint8_t index, size_t &count) {
-  switch (index) {
-    case 1:
-      count = sizeof(kHistoryMenuItems) / sizeof(kHistoryMenuItems[0]);
-      return kHistoryMenuItems;
-    case 2:
-      count = sizeof(kPartyMenuItems) / sizeof(kPartyMenuItems[0]);
-      return kPartyMenuItems;
-    case kSettingsMenuIndex:
-      count = sizeof(kSettingsMenuItems) / sizeof(kSettingsMenuItems[0]);
-      return kSettingsMenuItems;
-    default:
-      count = 0;
-      return nullptr;
-  }
-}
-
+// ---------------------------------------------------------------------------
+// Icon bitmaps (16×16 XBM unless noted)
+// ---------------------------------------------------------------------------
 
 constexpr uint8_t kIcon16 = 16;
-const uint8_t kIconHeating[] = {
-    0x00, 0x00, 0x10, 0x11, 0x20, 0x22, 0x20, 0x22, 0x10, 0x11, 0x88,
-    0x08, 0x44, 0x04, 0x44, 0x04, 0x88, 0x08, 0x10, 0x11, 0x20, 0x22,
-    0x20, 0x22, 0x10, 0x11, 0x88, 0x08, 0x00, 0x00, 0xfe, 0x7f,
-};
+constexpr uint8_t kIcon15 = 15;
+
 const uint8_t kIconCalib[] = {
-    0x00, 0x00, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x00,
-    0x00, 0x00, 0x00, 0x9e, 0x79, 0x9e, 0x79, 0x00, 0x00, 0x00, 0x00,
-    0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x00, 0x00
-};
-const uint8_t kIconWifiBle[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x08, 0x08, 0x10, 0x24,
-    0x24, 0x14, 0x28, 0x94, 0x29, 0x94, 0x29, 0x14, 0x28, 0xa4, 0x25,
-    0x88, 0x11, 0x90, 0x09, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01,
-};
-const uint8_t kIconOffTimer[] = {
-    0x00, 0x00, 0x00, 0x00, 0xf0, 0x1f, 0x08, 0x20, 0x08, 0x20, 0x08,
-    0x20, 0x10, 0x10, 0x20, 0x08, 0x40, 0x04, 0x40, 0x05, 0x20, 0x09,
-    0x90, 0x13, 0x48, 0x25, 0xa8, 0x2a, 0x58, 0x35, 0xf0, 0x1f,
-};
-const uint8_t kIconLed[] = {
-    0x00, 0x00, 0x10, 0x10, 0x22, 0x48, 0x44, 0x24, 0x08, 0x10, 0xe1,
-    0x87, 0x12, 0x48, 0x08, 0x10, 0x08, 0x14, 0x0b, 0xd4, 0x08, 0x14,
-    0x08, 0x14, 0x08, 0x14, 0x08, 0x10, 0x08, 0x10, 0xfc, 0x3f,
-};
-const uint8_t kIconReset[] = {
-    0x00, 0x00, 0x20, 0x00, 0x30, 0x00, 0xf8, 0x03, 0xf8, 0x0f, 0x30,
-    0x0c, 0x20, 0x18, 0x00, 0x18, 0x0c, 0x30, 0x0c, 0x30, 0x18, 0x18,
-    0x18, 0x18, 0x30, 0x0c, 0xf0, 0x0f, 0xc0, 0x03, 0x00, 0x00,
+  0x00,0x00,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x00,0x00,0x00,0x00,
+  0x9e,0x79,0x9e,0x79,0x00,0x00,0x00,0x00,0x80,0x01,0x80,0x01,0x80,0x01,
+  0x80,0x01,0x00,0x00
 };
 const uint8_t kIconSensor[] = {
-    0x00, 0x00, 0x02, 0x00, 0x07, 0x00, 0x02, 0x00, 0x02, 0x00, 0x02,
-    0x00, 0x02, 0x00, 0xaa, 0x2a, 0x02, 0x00, 0x82, 0x07, 0xc2, 0x00,
-    0x72, 0x00, 0x1e, 0x00, 0x06, 0x20, 0xfe, 0x7f, 0x00, 0x20,
+  0x00,0x00,0x02,0x00,0x07,0x00,0x02,0x00,0x02,0x00,0x02,0x00,0x02,0x00,
+  0xaa,0x2a,0x02,0x00,0x82,0x07,0xc2,0x00,0x72,0x00,0x1e,0x00,0x06,0x20,
+  0xfe,0x7f,0x00,0x20
+};
+const uint8_t kIconWifiBle[] = {
+  0x00,0x00,0x00,0x00,0x00,0x00,0x10,0x08,0x08,0x10,0x24,0x24,0x14,0x28,
+  0x94,0x29,0x94,0x29,0x14,0x28,0xa4,0x25,0x88,0x11,0x90,0x09,0x80,0x01,
+  0x80,0x01,0x80,0x01
+};
+const uint8_t kIconOffTimer[] = {
+  0x00,0x00,0x00,0x00,0xf0,0x1f,0x08,0x20,0x08,0x20,0x08,0x20,0x10,0x10,
+  0x20,0x08,0x40,0x04,0x40,0x05,0x20,0x09,0x90,0x13,0x48,0x25,0xa8,0x2a,
+  0x58,0x35,0xf0,0x1f
+};
+const uint8_t kIconLed[] = {
+  0x00,0x00,0x10,0x10,0x22,0x48,0x44,0x24,0x08,0x10,0xe1,0x87,0x12,0x48,
+  0x08,0x10,0x08,0x14,0x0b,0xd4,0x08,0x14,0x08,0x14,0x08,0x14,0x08,0x10,
+  0x08,0x10,0xfc,0x3f
+};
+const uint8_t kIconReset[] = {
+  0x00,0x00,0x20,0x00,0x30,0x00,0xf8,0x03,0xf8,0x0f,0x30,0x0c,0x20,0x18,
+  0x00,0x18,0x0c,0x30,0x0c,0x30,0x18,0x18,0x18,0x18,0x30,0x0c,0xf0,0x0f,
+  0xc0,0x03,0x00,0x00
 };
 const uint8_t kIconBuzzer[] = {
-    0x00, 0x00, 0x30, 0x0c, 0x38, 0x18, 0xbc, 0x11, 0x3f, 0x33, 0x3f,
-    0x22, 0x3f, 0x22, 0x3f, 0x22, 0x3f, 0x22, 0x3f, 0x22, 0x3f, 0x22,
-    0x3f, 0x33, 0xbc, 0x11, 0x38, 0x18, 0x30, 0x0c, 0x00, 0x00,
+  0x00,0x00,0x30,0x0c,0x38,0x18,0xbc,0x11,0x3f,0x33,0x3f,0x22,0x3f,0x22,
+  0x3f,0x22,0x3f,0x22,0x3f,0x22,0x3f,0x22,0x3f,0x33,0xbc,0x11,0x38,0x18,
+  0x30,0x0c,0x00,0x00
 };
 const uint8_t kIconFwUpdate[] = {
-    0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80,
-    0x01, 0xe0, 0x07, 0xc0, 0x03, 0x80, 0x01, 0x00, 0x00, 0xf0, 0x0f,
-    0x10, 0x08, 0x90, 0x09, 0x10, 0x08, 0x10, 0x08, 0xf0, 0x0f,
+  0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0x80,0x01,0xe0,0x07,
+  0xc0,0x03,0x80,0x01,0x00,0x00,0xf0,0x0f,0x10,0x08,0x90,0x09,0x10,0x08,
+  0x10,0x08,0xf0,0x0f
 };
 const uint8_t kIconVibration[] = {
-    0x00, 0x00, 0x00, 0x00, 0x0c, 0x30, 0x06, 0x60, 0x42, 0x06, 0x02,
-    0x0c, 0x92, 0x49, 0x52, 0x4a, 0x52, 0x4a, 0x92, 0x49, 0x30, 0x40,
-    0x60, 0x42, 0x06, 0x60, 0x0c, 0x30, 0x00, 0x00, 0x00, 0x00,
-};
-const uint8_t kIconBlow[] = {
-    0x00, 0x00, 0xc0, 0x03, 0x20, 0x3c, 0x20, 0x64, 0x00, 0x41, 0xf0,
-    0x50, 0x0f, 0x58, 0x00, 0x40, 0xff, 0x21, 0x00, 0x38, 0x0f, 0x40,
-    0xf0, 0x50, 0x00, 0x49, 0x20, 0x30, 0x20, 0x0c, 0xc0, 0x03
-};
-
-void renderMeasurement(const MeasurementController &measurement, uint32_t nowMs) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  const bool heating = measurement.phase() == MeasurementController::Phase::Heating;
-  const bool retry = measurement.isRetry();
-  const char *title = retry ? "Retry" : (heating ? "Heating" : "Blow");
-
-  display.setFont(u8g2_font_9x15_tf);
-  const uint8_t titleWidth = display.getStrWidth(title);
-  const uint8_t titleX = (kDisplayWidth - titleWidth) / 2;
-  uint8_t titleY = kMenuTop + 20;
-  if (!heating) {
-    titleY = static_cast<uint8_t>(titleY + 4);
-  }
-  display.setCursor(titleX, titleY);
-  display.print(title);
-
-  if (heating) {
-    const uint8_t iconY = kMenuTop + 6;
-    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 10;
-    const int16_t rightX =
-        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 10;
-    display.setDrawColor(1);
-    display.setBitmapMode(1);
-    if (leftX >= 0) {
-      display.drawXBMP(static_cast<uint8_t>(leftX), iconY, kIcon16, kIcon16, kIconHeating);
-    }
-    if (rightX + kIcon16 <= kDisplayWidth) {
-      display.drawXBMP(static_cast<uint8_t>(rightX), iconY, kIcon16, kIcon16, kIconHeating);
-    }
-
-    const uint32_t remainingMs = measurement.heatingRemainingMs(nowMs);
-    const uint32_t remainingSec = (remainingMs + 999) / 1000;
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%lu", static_cast<unsigned long>(remainingSec));
-    display.setFont(u8g2_font_6x10_tf);
-    const uint8_t countWidth = display.getStrWidth(buffer);
-    const uint8_t countX = (kDisplayWidth - countWidth) / 2;
-    display.setCursor(countX, kMenuTop + 40);
-    display.print(buffer);
-  } else {
-    const uint8_t iconY = static_cast<uint8_t>(kMenuTop + 11);
-    const int16_t leftX = static_cast<int16_t>(titleX) - kIcon16 - 14;
-    const int16_t rightX =
-        static_cast<int16_t>(titleX) + static_cast<int16_t>(titleWidth) + 14;
-    display.setDrawColor(1);
-    display.setBitmapMode(1);
-    if (leftX >= 0) {
-      display.drawXBMP(static_cast<uint8_t>(leftX), iconY, kIcon16, kIcon16, kIconBlow);
-    }
-    if (rightX + kIcon16 <= kDisplayWidth) {
-      display.drawXBMP(static_cast<uint8_t>(rightX), iconY, kIcon16, kIcon16, kIconBlow);
-    }
-  }
-
-  display.sendBuffer();
-}
-
-void renderQrCode() {
-  display.clearBuffer();
-  const uint8_t x = kDisplayWidth - kQrCodeWidth;
-  const uint8_t y = (kDisplayHeight - kQrCodeHeight) / 2;
-  display.drawXBMP(x, y, kQrCodeWidth, kQrCodeHeight, kQrCodeBits);
-
-  display.setFont(u8g2_font_5x8_tf);
-  const uint8_t textX = 2;
-  uint8_t textY = 14;
-  display.setCursor(textX, textY);
-  display.print("Alkoblas V2");
-  textY += 12;
-  display.setCursor(textX, textY);
-  display.print(kHardwareRev);
-  textY += 12;
-  display.setCursor(textX, textY);
-  display.print("Firm: ");
-  display.print(kFirmwareVersion);
-  textY += 12;
-  display.setCursor(textX, textY);
-  display.print("Date ");
-  display.print(kBuildDate);
-
-  display.sendBuffer();
-}
-
-bool loadStoredFirmwareVersion(char *out, size_t outSize) {
-  if (!LittleFS.exists(kFwInfoFile)) {
-    return false;
-  }
-  File file = LittleFS.open(kFwInfoFile, "r");
-  if (!file) {
-    return false;
-  }
-  size_t n = file.readBytesUntil('\n', out, outSize - 1);
-  out[n] = '\0';
-  file.close();
-  return n > 0;
-}
-
-void saveStoredFirmwareVersion(const char *version) {
-  File file = LittleFS.open(kFwInfoFile, "w");
-  if (!file) {
-    return;
-  }
-  file.print(version);
-  file.close();
-}
-
-void renderFwUpdateComplete() {
-  display.clearBuffer();
-  display.setFont(u8g2_font_6x10_tf);
-  const char title[] = "FW Update complete";
-  const uint8_t titleWidth = display.getStrWidth(title);
-  const uint8_t titleX = (kDisplayWidth - titleWidth) / 2;
-  const uint8_t contentTop = kMenuTop;
-  const uint8_t contentHeight = kDisplayHeight - kMenuTop;
-  const uint8_t centerY = contentTop + contentHeight / 2;
-  display.setCursor(titleX, static_cast<uint8_t>(centerY - 8));
-  display.print(title);
-
-  char versions[40];
-  snprintf(versions, sizeof(versions), "V%s -> V%s", fwPrevVersion, kFirmwareVersion);
-  const uint8_t verWidth = display.getStrWidth(versions);
-  const uint8_t verX = (kDisplayWidth - verWidth) / 2;
-  display.setCursor(verX, static_cast<uint8_t>(centerY + 8));
-  display.print(versions);
-
-  display.sendBuffer();
-}
-
-void renderRoulettePromille() {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(18, kMenuTop + 20);
-  display.print("Promille");
-
-  char buffer[12];
-  snprintf(buffer, sizeof(buffer), "%.2f", appState.lastMeasurement);
-  display.setFont(u8g2_font_6x10_tf);
-  const uint8_t valueWidth = display.getStrWidth(buffer);
-  const uint8_t valueX = (kDisplayWidth - valueWidth) / 2;
-  display.setCursor(valueX, kMenuTop + 40);
-  display.print(buffer);
-
-  display.sendBuffer();
-}
-
-void renderRouletteResult() {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(20, kMenuTop + 30);
-  display.print(rouletteLastHit ? "BANG!" : "Blank");
-
-  display.sendBuffer();
-}
-
-void renderDuelResult() {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_6x10_tf);
-  display.setCursor(6, kMenuTop + 22);
-  display.print(duelMessage);
-
-  display.sendBuffer();
-}
-
-void renderDuelVersus(const String &userA, const String &userB) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_6x10_tf);
-  display.setCursor(10, kMenuTop + 18);
-  display.print(userA);
-  display.setCursor(10, kMenuTop + 32);
-  display.print("VS");
-  display.setCursor(10, kMenuTop + 46);
-  display.print(userB);
-
-  display.sendBuffer();
-}
-
-void renderDuelPrompt(const String &user, const char *label) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_6x10_tf);
-  display.setCursor(10, kMenuTop + 22);
-  display.print(user);
-  display.setCursor(10, kMenuTop + 38);
-  display.print(label);
-
-  display.sendBuffer();
-}
-
-constexpr uint8_t kIcon15 = 15;
-const uint8_t kIconMeasure[] = {
-    0x00, 0x00, 0x02, 0x00, 0x07, 0x00, 0x82, 0x3f, 0x42, 0x00, 0x22,
-    0x00, 0x22, 0x00, 0x12, 0x00, 0x12, 0x00, 0x12, 0x00, 0x0a,
-    0x00, 0x0a, 0x00, 0x0a, 0x00, 0x06, 0x20, 0xfe, 0x7f, 0x00,
-    0x20,
-};
-const uint8_t kIconHistory[] = {
-    0xe0, 0x07, 0x18, 0x18, 0x84, 0x20, 0x82, 0x40, 0x82, 0x40, 0x81,
-    0x80, 0x81, 0x80, 0x81, 0x80, 0x81, 0xbf, 0x01, 0x80, 0x01,
-    0x80, 0x02, 0x40, 0x02, 0x40, 0x04, 0x20, 0x18, 0x18, 0xe0,
-    0x07,
-};
-const uint8_t kIconParty[] = {
-    0x80, 0x00, 0x08, 0x12, 0x10, 0x0a, 0x00, 0x21, 0x20, 0x10, 0x70,
-    0xc8, 0xc8, 0x20, 0x88, 0x01, 0x0c, 0x63, 0x1c, 0x86, 0x32,
-    0x0c, 0x62, 0x24, 0xc1, 0x83, 0xc1, 0x00, 0x31, 0x00, 0x0f,
-    0x00,
+  0x00,0x00,0x00,0x00,0x0c,0x30,0x06,0x60,0x42,0x06,0x02,0x0c,0x92,0x49,
+  0x52,0x4a,0x52,0x4a,0x92,0x49,0x30,0x40,0x60,0x42,0x06,0x60,0x0c,0x30,
+  0x00,0x00,0x00,0x00
 };
 const uint8_t kIconSleep[] = {
-    0x00, 0x00, 0xe0, 0x03, 0x18, 0x0c, 0x84, 0x10, 0x84, 0x10, 0xa2,
-    0x22, 0x92, 0x24, 0x12, 0x24, 0x12, 0x24, 0x22, 0x22, 0xc4,
-    0x11, 0x04, 0x10, 0x18, 0x0c, 0xe0, 0x03, 0x00, 0x00,
+  0x00,0x00,0xe0,0x03,0x18,0x0c,0x84,0x10,0x84,0x10,0xa2,0x22,0x92,0x24,
+  0x12,0x24,0x12,0x24,0x22,0x22,0xc4,0x11,0x04,0x10,0x18,0x0c,0xe0,0x03,
+  0x00,0x00
 };
 const uint8_t kIconSettings[] = {
-    0x00, 0x18, 0x00, 0x1c, 0x00, 0x0e, 0x00, 0xc6, 0x00, 0xe6, 0x00,
-    0x7f, 0x80, 0x3f, 0xc0, 0x07, 0xe0, 0x03, 0xf0, 0x01, 0xfc,
-    0x00, 0x76, 0x00, 0x22, 0x00, 0x32, 0x00, 0x1e, 0x00, 0x00,
-    0x00,
+  0x00,0x18,0x00,0x1c,0x00,0x0e,0x00,0xc6,0x00,0xe6,0x00,0x7f,0x80,0x3f,
+  0xc0,0x07,0xe0,0x03,0xf0,0x01,0xfc,0x00,0x76,0x00,0x22,0x00,0x32,0x00,
+  0x1e,0x00,0x00,0x00
 };
 const uint8_t kIconAbout[] = {
-    0xe0, 0x07, 0x18, 0x18, 0x04, 0x20, 0x82, 0x41, 0x82, 0x41, 0x01,
-    0x80, 0x01, 0x80, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
-    0x81, 0x82, 0x41, 0x82, 0x41, 0x04, 0x20, 0x18, 0x18, 0xe0,
-    0x07,
-};
-const uint8_t kIconDuel[] = {
-    0x00, 0x00, 0x0e, 0x70, 0x16, 0x68, 0x2a, 0x54, 0x54, 0x2a, 0xa8, 
-    0x15, 0x50, 0x09, 0xa0, 0x06, 0x60, 0x05, 0x94, 0x2a, 0xac, 0x35,
-    0x58, 0x1a, 0x3c, 0x3c, 0x6e, 0x76, 0x07, 0xe0, 0x03, 0xc0
-};
-const uint8_t kIconRoulette[] = {
-    0x00, 0x00, 0x00, 0x00, 0xf3, 0xc7, 0x3e, 0xfc, 0xec, 0xff, 0x38,
-    0xfc, 0xf8, 0x07, 0xb8, 0x02, 0x3c, 0x02, 0xfc, 0x01, 0x3c, 0x00,
-    0x3e, 0x00, 0x3e, 0x00, 0x3e, 0x00, 0x1c, 0x00, 0x00, 0x00,
+  0xe0,0x07,0x18,0x18,0x04,0x20,0x82,0x41,0x82,0x41,0x01,0x80,0x01,0x80,
+  0x81,0x81,0x81,0x81,0x81,0x81,0x81,0x81,0x82,0x41,0x82,0x41,0x04,0x20,
+  0x18,0x18,0xe0,0x07
 };
 const uint8_t kIconReturn[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x18, 0x00, 0xfc,
-    0x03, 0xf8, 0x07, 0x10, 0x0e, 0x00, 0x1c, 0x00, 0x18, 0x00, 0x18,
-    0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x10,0x00,0x18,0x00,0xfc,0x03,0xf8,0x07,
+  0x10,0x0e,0x00,0x1c,0x00,0x18,0x00,0x18,0x00,0x18,0x00,0x00,0x00,0x00,
+  0x00,0x00,0x00,0x00
+};
+const uint8_t kIconMeasure[] = {
+  0x00,0x00,0x02,0x00,0x07,0x00,0x82,0x3f,0x42,0x00,0x22,0x00,0x22,0x00,
+  0x12,0x00,0x12,0x00,0x12,0x00,0x0a,0x00,0x0a,0x00,0x0a,0x00,0x06,0x20,
+  0xfe,0x7f,0x00,0x20
 };
 
-void renderPartyMenu(uint8_t selectedIndex) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
+// ---------------------------------------------------------------------------
+// Hardware objects
+// ---------------------------------------------------------------------------
 
-  const uint8_t itemHeight = kMenuHeight / 2;
-  const uint8_t itemCount = sizeof(kPartyMenuItems) / sizeof(kPartyMenuItems[0]);
-  const uint8_t visibleCount = 2;
-  uint8_t firstIndex = 0;
-  if (selectedIndex >= visibleCount) {
-    firstIndex = selectedIndex - (visibleCount - 1);
-  }
-  if (firstIndex + visibleCount > itemCount) {
-    firstIndex = itemCount - visibleCount;
-  }
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
+Ui             ui(display);
+Buzzer         buzzer(PIN_BUZZER, kPwmChannelBuzzer, kBuzzerPwmHz);
+VibrationMotor vib(PIN_VIB,      kPwmChannelVib,    kVibPwmHz);
+NeopixelLed    neopixel(PIN_LED);
+BatteryManager battery;
 
-  for (uint8_t i = 0; i < visibleCount; ++i) {
-    const uint8_t itemIndex = firstIndex + i;
-    if (itemIndex >= itemCount) {
-      break;
-    }
-    const uint8_t rowTop = kMenuTop + i * itemHeight;
-    if (itemIndex == selectedIndex) {
-      display.setDrawColor(1);
-      display.drawFrame(0, rowTop, kDisplayWidth, itemHeight);
-    }
-
-    display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
-    const uint8_t textX = 36;
-    const int16_t ascent = display.getAscent();
-    const int16_t descent = display.getDescent();
-    const int16_t textHeight = ascent - descent;
-    const int16_t textY = rowTop + (itemHeight - textHeight) / 2 + ascent;
-    display.setCursor(textX, static_cast<uint8_t>(textY));
-    display.print(kPartyMenuItems[itemIndex]);
-
-    const uint8_t iconX = 8;
-    if (itemIndex == 0) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconReturn);
-    } else if (itemIndex == kPartyDuelIndex) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconDuel);
-    } else if (itemIndex == kPartyRouletteIndex) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconRoulette);
-    }
-
-    if (itemIndex == kPartyDuelIndex || itemIndex == kPartyRouletteIndex) {
-      const uint8_t boxSize = 10;
-      const uint8_t boxX = kDisplayWidth - 16;
-      const uint8_t boxY = rowTop + (itemHeight - boxSize) / 2;
-      display.drawFrame(boxX, boxY, boxSize, boxSize);
-      if (itemIndex == kPartyDuelIndex && duelEnabled) {
-        display.drawBox(boxX + 2, boxY + 2, boxSize - 4, boxSize - 4);
-      } else if (itemIndex == kPartyRouletteIndex && rouletteEnabled) {
-        display.drawBox(boxX + 2, boxY + 2, boxSize - 4, boxSize - 4);
-      }
-    }
-  }
-
+// Sends the display buffer over I2C while holding the shared Wire mutex so
+// the BMS monitor task cannot interleave its I2C reads mid-transfer.
+static inline void sendDisplay() {
+  xSemaphoreTake(battery.wireMutex(), portMAX_DELAY);
   display.sendBuffer();
+  xSemaphoreGive(battery.wireMutex());
 }
 
-void renderSubmenuWithReturnIcon(const char *const *menuItems, size_t menuCount,
-                                 uint8_t selectedIndex) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
+// ---------------------------------------------------------------------------
+// Application state
+// ---------------------------------------------------------------------------
 
-  const uint8_t itemHeight = kMenuHeight / 2;
-  const uint8_t totalItems = static_cast<uint8_t>(menuCount);
-  const uint8_t visibleCount = 2;
-  uint8_t firstIndex = 0;
-  if (selectedIndex >= visibleCount) {
-    firstIndex = selectedIndex - (visibleCount - 1);
-  }
-  if (firstIndex + visibleCount > totalItems) {
-    firstIndex = totalItems - visibleCount;
-  }
+struct ButtonState {
+  bool     lastLevel     = false;
+  uint32_t pressedMs     = 0;
+  bool     longReported  = false;
+  bool     extraReported = false;
+  bool     pendingShort  = false;
+};
 
-  for (uint8_t i = 0; i < visibleCount; ++i) {
-    const uint8_t itemIndex = firstIndex + i;
-    if (itemIndex >= totalItems) {
-      break;
-    }
-    const uint8_t rowTop = kMenuTop + i * itemHeight;
-    if (itemIndex == selectedIndex) {
-      display.setDrawColor(1);
-      display.drawFrame(0, rowTop, kDisplayWidth, itemHeight);
-    }
+struct AppContext {
+  struct Menu {
+    uint8_t mainIndex     = 0;
+    uint8_t subIndex      = 0;
+    bool    inSubmenu     = false;
+    bool    inWifiBleMenu = false;
+    uint8_t wifiBleIndex  = 0;
+    bool    showingQr     = false;
+    bool    adjusting     = false;
+    uint8_t settingSlot   = 0;
+    bool    settingDirty  = false;
+  } menu;
 
-    display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
-    const uint8_t textX = 36;
-    const int16_t ascent = display.getAscent();
-    const int16_t descent = display.getDescent();
-    const int16_t textHeight = ascent - descent;
-    const int16_t textY = rowTop + (itemHeight - textHeight) / 2 + ascent;
-    display.setCursor(textX, static_cast<uint8_t>(textY));
-    display.print(menuItems[itemIndex]);
+  struct Device {
+    uint8_t  batteryPercent     = 0;
+    bool     charging           = false;
+    bool     plugged            = false;
+    uint8_t  chargerFaultReason = 0;
+    uint8_t  chargerTsFault     = 0;
+  } device;
 
-    if (itemIndex == 0) {
-      const uint8_t iconX = 8;
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconReturn);
-    } else if (mainMenuIndex == kSettingsMenuIndex) {
-      const uint8_t iconX = 8;
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      const uint8_t *icon = nullptr;
-      switch (itemIndex) {
-        case kSettingCalibIndex:
-          icon = kIconCalib;
-          break;
-        case kSettingLedIndex:
-          icon = kIconLed;
-          break;
-        case kSettingBuzzIndex:
-          icon = kIconBuzzer;
-          break;
-        case kSettingVibIndex:
-          icon = kIconVibration;
-          break;
-        case kSettingBuzzTestIndex:
-          icon = kIconBuzzer;
-          break;
-        case kSettingWifiBleIndex:
-          icon = kIconWifiBle;
-          break;
-        case kSettingSensIndex:
-          icon = kIconSensor;
-          break;
-        case kSettingSleepIndex:
-          icon = kIconOffTimer;
-          break;
-        case kSettingOtaIndex:
-          icon = kIconFwUpdate;
-          break;
-        case kSettingResetIndex:
-          icon = kIconReset;
-          break;
-        default:
-          break;
-      }
-      if (icon) {
-        display.drawXBMP(iconX, iconY, kIcon16, kIcon16, icon);
-      }
-    }
-  }
+  struct Settings {
+    uint8_t        ledLevel        = 5;
+    uint8_t        buzzerLevel     = 5;
+    uint8_t        vibLevel        = 5;
+    uint8_t        sensorSens      = 10;
+    uint16_t       sleepTimeoutSec = 300;
+    ConnectionMode connection      = ConnectionMode::Wifi;
+  } settings;
 
-  display.sendBuffer();
+  struct BuzzerTest {
+    bool     active    = false;
+    uint32_t endMs     = 0;
+    uint8_t  prevLevel = 0;
+  } buzzerTest;
+
+  struct Countdown {
+    bool     sleepPending = false;
+    uint32_t sleepStartMs = 0;
+    bool     resetPending = false;
+    uint32_t resetStartMs = 0;
+    bool     wifiPending  = false;
+    uint32_t wifiStartMs  = 0;
+  } countdown;
+
+  bool     fwUpdatePending   = false;
+  char     fwPrevVersion[16] = {};
+  bool     measureActive     = false;
+  bool     calibStubActive   = false;
+  float    lastMeasurement   = 0.0f;
+  uint32_t lastInteractionMs = 0;
+  uint32_t lastUiTickMs      = 0;
+};
+
+static AppContext  ctx;
+static ButtonState button;
+AppState           appState;
+
+// ---------------------------------------------------------------------------
+// Sync UI presentation state from AppContext
+// ---------------------------------------------------------------------------
+
+static void syncAppState() {
+  appState.batteryPercent     = ctx.device.batteryPercent;
+  appState.charging           = ctx.device.charging;
+  appState.connection         = ctx.settings.connection;
+  appState.lastMeasurement    = ctx.lastMeasurement;
+  appState.lastUser           = "Me";
+  appState.chargerFaultReason = ctx.device.chargerFaultReason;
+  appState.chargerTsFault     = ctx.device.chargerTsFault;
+  appState.menuIndex          = ctx.menu.inSubmenu ? ctx.menu.subIndex : ctx.menu.mainIndex;
 }
 
-void renderMainMenuWithMeasureIcon(uint8_t selectedIndex) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
+// ---------------------------------------------------------------------------
+// Settings: persist to / restore from LittleFS
+// ---------------------------------------------------------------------------
 
-  const uint8_t itemHeight = kMenuHeight / 2;
-  const uint8_t itemCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
-  const uint8_t visibleCount = 2;
-  uint8_t firstIndex = 0;
-  if (selectedIndex >= visibleCount) {
-    firstIndex = selectedIndex - (visibleCount - 1);
-  }
-  if (firstIndex + visibleCount > itemCount) {
-    firstIndex = itemCount - visibleCount;
-  }
+static const char kSettingsFile[] = "/settings.json";
+static const char kFwInfoFile[]   = "/fw_info.txt";
 
-  for (uint8_t i = 0; i < visibleCount; ++i) {
-    const uint8_t itemIndex = firstIndex + i;
-    if (itemIndex >= itemCount) {
-      break;
-    }
-    const uint8_t rowTop = kMenuTop + i * itemHeight;
-    if (itemIndex == selectedIndex) {
-      display.setDrawColor(1);
-      display.drawFrame(0, rowTop, kDisplayWidth, itemHeight);
-    }
-
-    display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
-    const uint8_t textX = 36;
-    const int16_t ascent = display.getAscent();
-    const int16_t descent = display.getDescent();
-    const int16_t textHeight = ascent - descent;
-    const int16_t textY = rowTop + (itemHeight - textHeight) / 2 + ascent;
-    display.setCursor(textX, static_cast<uint8_t>(textY));
-    display.print(kMenuItems[itemIndex]);
-
-    const uint8_t iconX = 8;
-    if (itemIndex == 0) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconMeasure);
-    } else if (itemIndex == 1) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconHistory);
-    } else if (itemIndex == 2) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconParty);
-    } else if (itemIndex == kSleepMenuIndex) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon15) / 2 - 1;
-      display.drawXBMP(iconX, iconY, kIcon15, kIcon15, kIconSleep);
-    } else if (itemIndex == kSettingsMenuIndex) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconSettings);
-    } else if (itemIndex == kAboutMenuIndex) {
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconAbout);
-    }
-  }
-
-  display.sendBuffer();
-}
-void applyDefaultSettings() {
-  settingValues[0] = 5;
-  settingValues[1] = 5;
-  settingValues[2] = 5;
-  settingSensValue = 10;
-  appState.connection = ConnectionMode::Wifi;
-  sleepTimeoutSec = 300;
+static void applyDefaultSettings() {
+  ctx.settings.ledLevel        = 5;
+  ctx.settings.buzzerLevel     = 5;
+  ctx.settings.vibLevel        = 5;
+  ctx.settings.sensorSens      = 10;
+  ctx.settings.sleepTimeoutSec = 300;
+  ctx.settings.connection      = ConnectionMode::Wifi;
 }
 
-void applyActuatorLevels() {
-  neopixel.setLevel(settingValues[0]);
-  buzzer.setLevel(settingValues[1]);
-  vib.setLevel(settingValues[2]);
+static void applyActuatorLevels() {
+  neopixel.setLevel(ctx.settings.ledLevel);
+  buzzer.setLevel(ctx.settings.buzzerLevel);
+  vib.setLevel(ctx.settings.vibLevel);
 }
 
-void applyMicThresholdFromSetting() {
-  const uint32_t minThresh = 300u;
-  const uint32_t maxThresh = 3500u;
-  const uint32_t scaled =
-      (static_cast<uint32_t>(settingSensValue) * (maxThresh - minThresh)) / 25u;
-  const uint16_t threshold = static_cast<uint16_t>(minThresh + scaled);
-  measurement.setMicThreshold(threshold);
-}
-
-void startBuzzerTest(uint32_t nowMs) {
-  buzzerTestPrevLevel = settingValues[1];
-  buzzer.setLevel(10);
-  buzzer.playTone(kBuzzerTestToneHz, kBuzzerTestDurationMs, 100);
-  buzzerTestEndMs = nowMs + kBuzzerTestDurationMs;
-  buzzerTestActive = true;
-}
-
-void saveSettings() {
+static void saveSettings() {
   JsonDocument doc;
-  doc["led"] = settingValues[0];
-  doc["buzz"] = settingValues[1];
-  doc["vib"] = settingValues[2];
-  doc["sens"] = settingSensValue;
-  doc["sleepTimeout"] = sleepTimeoutSec;
-  doc["connection"] = appState.connection == ConnectionMode::Wifi ? "wifi" : "ble";
-
-  File file = LittleFS.open("/settings.json", "w");
-  if (!file) {
-    return;
-  }
-  serializeJson(doc, file);
-  file.close();
+  doc["led"]          = ctx.settings.ledLevel;
+  doc["buzz"]         = ctx.settings.buzzerLevel;
+  doc["vib"]          = ctx.settings.vibLevel;
+  doc["sens"]         = ctx.settings.sensorSens;
+  doc["sleepTimeout"] = ctx.settings.sleepTimeoutSec;
+  doc["connection"]   = ctx.settings.connection == ConnectionMode::Wifi ? "wifi" : "ble";
+  File f = LittleFS.open(kSettingsFile, "w");
+  if (f) { serializeJson(doc, f); f.close(); }
 }
 
-bool loadSettings() {
-  if (!LittleFS.exists("/settings.json")) {
-    return false;
-  }
-  File file = LittleFS.open("/settings.json", "r");
-  if (!file) {
-    return false;
-  }
+static bool loadSettings() {
+  if (!LittleFS.exists(kSettingsFile)) return false;
+  File f = LittleFS.open(kSettingsFile, "r");
+  if (!f) return false;
   JsonDocument doc;
-  const DeserializationError err = deserializeJson(doc, file);
-  file.close();
-  if (err) {
-    return false;
-  }
-
-  settingValues[0] = doc["led"] | settingValues[0];
-  settingValues[1] = doc["buzz"] | settingValues[1];
-  settingValues[2] = doc["vib"] | settingValues[2];
-  settingSensValue = doc["sens"] | settingSensValue;
-  sleepTimeoutSec = doc["sleepTimeout"] | sleepTimeoutSec;
-  if (sleepTimeoutSec > kSleepTimeoutMaxSec) {
-    sleepTimeoutSec = kSleepTimeoutMaxSec;
-  }
-  const char *conn = doc["connection"] | "ble";
-  if (strcmp(conn, "wifi") == 0) {
-    appState.connection = ConnectionMode::Wifi;
-  } else {
-    appState.connection = ConnectionMode::BLE;
-  }
+  const bool ok = (deserializeJson(doc, f) == DeserializationError::Ok);
+  f.close();
+  if (!ok) return false;
+  ctx.settings.ledLevel        = doc["led"]          | ctx.settings.ledLevel;
+  ctx.settings.buzzerLevel     = doc["buzz"]         | ctx.settings.buzzerLevel;
+  ctx.settings.vibLevel        = doc["vib"]          | ctx.settings.vibLevel;
+  ctx.settings.sensorSens      = doc["sens"]         | ctx.settings.sensorSens;
+  ctx.settings.sleepTimeoutSec = doc["sleepTimeout"] | ctx.settings.sleepTimeoutSec;
+  if (ctx.settings.sleepTimeoutSec > kSleepTimeoutMaxSec)
+    ctx.settings.sleepTimeoutSec = kSleepTimeoutMaxSec;
+  const char *conn = doc["connection"] | "wifi";
+  ctx.settings.connection = (strcmp(conn, "wifi") == 0) ? ConnectionMode::Wifi : ConnectionMode::BLE;
   return true;
 }
 
-void saveUserMeasurement(const char *userId, float measurement, time_t timestampSec) {
-  if (userId == nullptr || userId[0] == '\0') {
+// ---------------------------------------------------------------------------
+// Firmware version tracking (OTA update detection)
+// ---------------------------------------------------------------------------
+
+static void checkFirmwareVersion() {
+  if (!LittleFS.exists(kFwInfoFile)) {
+    File f = LittleFS.open(kFwInfoFile, "w");
+    if (f) { f.print(kFirmwareVersion); f.close(); }
     return;
   }
-
-  JsonDocument doc;
-  if (LittleFS.exists(kUsersFile)) {
-    File file = LittleFS.open(kUsersFile, "r");
-    if (file) {
-      deserializeJson(doc, file);
-      file.close();
-    }
+  File f = LittleFS.open(kFwInfoFile, "r");
+  if (!f) return;
+  char stored[16] = "";
+  const size_t n = f.readBytesUntil('\n', stored, sizeof(stored) - 1);
+  stored[n] = '\0';
+  f.close();
+  if (n > 0 && strcmp(stored, kFirmwareVersion) != 0) {
+    strncpy(ctx.fwPrevVersion, stored, sizeof(ctx.fwPrevVersion) - 1);
+    ctx.fwUpdatePending = true;
   }
-
-  JsonObject users = doc["users"].is<JsonObject>() ? doc["users"].as<JsonObject>()
-                                                   : doc["users"].to<JsonObject>();
-  JsonObject user = users[userId].to<JsonObject>();
-  if (!user["color"].is<const char *>()) {
-    user["color"] = "";
-  }
-  if (!user["streak"].is<int>()) {
-    user["streak"] = 0;
-  }
-  if (!user["roulette"].is<bool>()) {
-    user["roulette"] = 0;
-  }
-  if (!user["duel"].is<bool>()) {
-    user["duel"] = 0;
-  }
-  user["measurement"] = measurement;
-  user["timestamp"] = timestampSec;
-
-  File outFile = LittleFS.open(kUsersFile, "w");
-  if (!outFile) {
-    return;
-  }
-  serializeJson(doc, outFile);
-  outFile.close();
 }
 
-bool loadUsers(JsonDocument &doc) {
-  if (!LittleFS.exists(kUsersFile)) {
-    return false;
-  }
-  File file = LittleFS.open(kUsersFile, "r");
-  if (!file) {
-    return false;
-  }
-  const DeserializationError err = deserializeJson(doc, file);
-  file.close();
-  if (err) {
-    return false;
-  }
-  return doc["users"].is<JsonObject>();
+static void acknowledgeNewFirmware() {
+  File f = LittleFS.open(kFwInfoFile, "w");
+  if (f) { f.print(kFirmwareVersion); f.close(); }
+  ctx.fwUpdatePending = false;
 }
 
-size_t collectUserIds(const JsonObject &users, String *ids, size_t maxCount) {
-  size_t count = 0;
-  for (JsonPair kv : users) {
-    if (count >= maxCount) {
-      break;
-    }
-    ids[count++] = String(kv.key().c_str());
-  }
-  return count;
-}
+// ---------------------------------------------------------------------------
+// Rendering helpers
+// ---------------------------------------------------------------------------
 
-size_t collectEligibleUserIds(const JsonObject &users, const char *flagKey, String *ids,
-                              size_t maxCount) {
-  size_t count = 0;
-  for (JsonPair kv : users) {
-    if (count >= maxCount) {
-      break;
-    }
-    JsonObject user = kv.value().as<JsonObject>();
-    const bool enabled = user[flagKey] | false;
-    if (enabled) {
-      ids[count++] = String(kv.key().c_str());
-    }
-  }
-  return count;
-}
-
-bool userFlagEnabled(const JsonObject &users, const String &userId, const char *flagKey) {
-  JsonObject user = users[userId].as<JsonObject>();
-  if (!user) {
-    return false;
-  }
-  return user[flagKey] | false;
-}
-
-String pickWeightedUser(const String *ids, size_t count, const DuelMode &mode,
-                        const String &exclude) {
-  uint16_t total = 0;
-  for (size_t i = 0; i < count; ++i) {
-    if (ids[i] == exclude) {
-      continue;
-    }
-    total = static_cast<uint16_t>(total + mode.weightFor(ids[i]));
-  }
-  if (total == 0) {
-    return String();
-  }
-  uint16_t roll = static_cast<uint16_t>(random(total));
-  for (size_t i = 0; i < count; ++i) {
-    if (ids[i] == exclude) {
-      continue;
-    }
-    uint8_t weight = mode.weightFor(ids[i]);
-    if (roll < weight) {
-      return ids[i];
-    }
-    roll = static_cast<uint16_t>(roll - weight);
-  }
-  return String();
-}
-
-float recentMeasurement(const JsonObject &users, const String &userId, time_t now) {
-  JsonObject user = users[userId].as<JsonObject>();
-  if (!user) {
-    return 0.0f;
-  }
-  const time_t ts = user["timestamp"] | 0;
-  if (ts == 0 || now < ts || (now - ts) > 15 * 60) {
-    return 0.0f;
-  }
-  return user["measurement"] | 0.0f;
-}
-
-void startResetCountdown(uint32_t nowMs) {
-  resetPending = true;
-  resetStartMs = nowMs;
-}
-
-void cancelResetCountdown() {
-  resetPending = false;
-}
-
-void renderResetCountdown(uint32_t nowMs) {
-  uint32_t remainingMs = 0;
-  if (nowMs < resetStartMs + kResetCountdownMs) {
-    remainingMs = (resetStartMs + kResetCountdownMs) - nowMs;
-  }
-  const uint8_t secondsLeft = static_cast<uint8_t>((remainingMs + 999) / 1000);
-
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
+static void clearContentArea() {
   display.setDrawColor(0);
   display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
   display.setDrawColor(1);
+}
 
-  display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(20, kMenuTop + 20);
-  display.print("Reset in:");
+// ---------------------------------------------------------------------------
+// Rendering: main menu
+// ---------------------------------------------------------------------------
 
-  char buffer[8];
-  snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
+static void renderMainMenu() {
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  clearContentArea();
+
+  const uint8_t itemH   = kMenuHeight / 2;
+  const uint8_t sel     = ctx.menu.mainIndex;
+  const uint8_t visible = 2;
+  uint8_t first = 0;
+  if (sel >= visible) first = sel - (visible - 1);
+  if (first + visible > kMainMenuCount) first = kMainMenuCount - visible;
+
   display.setFont(u8g2_font_6x10_tf);
-  const uint8_t countWidth = display.getStrWidth(buffer);
-  const uint8_t countX = (kDisplayWidth - countWidth) / 2;
-  display.setCursor(countX, kMenuTop + 38);
-  display.print(buffer);
-  display.sendBuffer();
-}
+  const int16_t asc  = display.getAscent();
+  const int16_t desc = display.getDescent();
 
-void startOtaCountdown(uint32_t nowMs) {
-  otaPending = true;
-  otaStartMs = nowMs;
-}
-
-void cancelOtaCountdown() {
-  otaPending = false;
-}
-
-void renderOtaCountdown(uint32_t nowMs) {
-  uint32_t remainingMs = 0;
-  if (nowMs < otaStartMs + kOtaCountdownMs) {
-    remainingMs = (otaStartMs + kOtaCountdownMs) - nowMs;
-  }
-  const uint8_t secondsLeft = static_cast<uint8_t>((remainingMs + 999) / 1000);
-
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(25, kMenuTop + 20);
-  display.print("FW Update");
-
-  char buffer[8];
-  snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
-  display.setFont(u8g2_font_6x10_tf);
-  const uint8_t countWidth = display.getStrWidth(buffer);
-  const uint8_t countX = (kDisplayWidth - countWidth) / 2;
-  display.setCursor(countX, kMenuTop + 38);
-  display.print(buffer);
-  display.sendBuffer();
-}
-
-void renderWifiBleMenu(uint8_t selectedIndex) {
-  display.clearBuffer();
-  ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
-  const uint8_t itemHeight = kMenuHeight / 2;
-  const uint8_t itemCount = sizeof(kWifiBleMenuItems) / sizeof(kWifiBleMenuItems[0]);
-  const uint8_t visibleCount = 2;
-  uint8_t firstIndex = 0;
-  if (selectedIndex >= visibleCount) {
-    firstIndex = selectedIndex - (visibleCount - 1);
-  }
-  if (firstIndex + visibleCount > itemCount) {
-    firstIndex = itemCount - visibleCount;
-  }
-
-  for (uint8_t i = 0; i < visibleCount; ++i) {
-    const uint8_t itemIndex = firstIndex + i;
-    if (itemIndex >= itemCount) {
-      break;
-    }
-    const uint8_t rowTop = kMenuTop + i * itemHeight;
-    const bool selected = itemIndex == selectedIndex;
-    if (selected) {
+  for (uint8_t i = 0; i < visible; ++i) {
+    const uint8_t idx    = first + i;
+    if (idx >= kMainMenuCount) break;
+    const uint8_t rowTop = kMenuTop + i * itemH;
+    if (idx == sel) {
       display.setDrawColor(1);
-      display.drawFrame(0, rowTop, kDisplayWidth, itemHeight);
+      display.drawFrame(0, rowTop, kDisplayWidth, itemH);
     }
-
     display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
-    const uint8_t textX = 36;
-    const int16_t ascent = display.getAscent();
-    const int16_t descent = display.getDescent();
-    const int16_t textHeight = ascent - descent;
-    const int16_t textY = rowTop + (itemHeight - textHeight) / 2 + ascent;
-    display.setCursor(textX, static_cast<uint8_t>(textY));
-    display.print(kWifiBleMenuItems[itemIndex]);
+    const int16_t textY = rowTop + (itemH - (asc - desc)) / 2 + asc;
+    display.setCursor(36, static_cast<uint8_t>(textY));
+    display.print(kMainMenuItems[idx]);
 
-    if (itemIndex == 0) {
-      const uint8_t iconX = 8;
-      const uint8_t iconY = rowTop + (itemHeight - kIcon16) / 2;
-      display.drawXBMP(iconX, iconY, kIcon16, kIcon16, kIconReturn);
-    } else {
-      const bool active =
-          (itemIndex == 1 && appState.connection == ConnectionMode::BLE) ||
-          (itemIndex == 2 && appState.connection == ConnectionMode::Wifi);
-      const uint8_t boxSize = 10;
-      const uint8_t boxX = kDisplayWidth - 14;
-      const uint8_t boxY = rowTop + (itemHeight - boxSize) / 2;
-      display.setDrawColor(1);
-      display.drawFrame(boxX, boxY, boxSize, boxSize);
-      if (active) {
-        display.drawBox(boxX + 2, boxY + 2, boxSize - 4, boxSize - 4);
-      }
+    const uint8_t iconY = rowTop + (itemH - kIcon16) / 2;
+    switch (idx) {
+      case kMainMeasureIndex:
+        display.drawXBMP(8, iconY, kIcon16, kIcon16, kIconMeasure);
+        break;
+      case kMainSleepIndex:
+        display.drawXBMP(8, rowTop + (itemH - kIcon15)/2 - 1, kIcon15, kIcon15, kIconSleep);
+        break;
+      case kMainSettingsIndex:
+        display.drawXBMP(8, iconY, kIcon16, kIcon16, kIconSettings);
+        break;
+      case kMainAboutIndex:
+        display.drawXBMP(8, iconY, kIcon16, kIcon16, kIconAbout);
+        break;
     }
   }
-
-  display.setDrawColor(1);
-  display.sendBuffer();
+  sendDisplay();
 }
 
-const char *settingLabel(uint8_t slot) {
+// ---------------------------------------------------------------------------
+// Rendering: settings submenu
+// Slot mapping for adjustments: 0=LED, 1=Buzzer, 2=Vibration, 3=OFF Timer
+// ---------------------------------------------------------------------------
+
+static const uint8_t *kSettingIconTable[kSettingsMenuCount] = {
+  kIconReturn, kIconCalib, kIconLed, kIconBuzzer, kIconVibration,
+  kIconBuzzer, kIconWifiBle, kIconSensor, kIconOffTimer, kIconFwUpdate, kIconReset
+};
+
+static void renderSettingsMenu() {
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  clearContentArea();
+
+  const uint8_t itemH   = kMenuHeight / 2;
+  const uint8_t sel     = ctx.menu.subIndex;
+  const uint8_t visible = 2;
+  uint8_t first = 0;
+  if (sel >= visible) first = sel - (visible - 1);
+  if (first + visible > kSettingsMenuCount) first = kSettingsMenuCount - visible;
+
+  display.setFont(u8g2_font_6x10_tf);
+  const int16_t asc  = display.getAscent();
+  const int16_t desc = display.getDescent();
+
+  for (uint8_t i = 0; i < visible; ++i) {
+    const uint8_t idx    = first + i;
+    const uint8_t rowTop = kMenuTop + i * itemH;
+    if (idx == sel) {
+      display.setDrawColor(1);
+      display.drawFrame(0, rowTop, kDisplayWidth, itemH);
+    }
+    display.setDrawColor(1);
+    const int16_t textY = rowTop + (itemH - (asc - desc)) / 2 + asc;
+    display.setCursor(36, static_cast<uint8_t>(textY));
+    display.print(kSettingsMenuItems[idx]);
+    const uint8_t iconY = rowTop + (itemH - kIcon16) / 2;
+    if (kSettingIconTable[idx])
+      display.drawXBMP(8, iconY, kIcon16, kIcon16, kSettingIconTable[idx]);
+  }
+  sendDisplay();
+}
+
+// ---------------------------------------------------------------------------
+// Rendering: WiFi/BLE submenu
+// ---------------------------------------------------------------------------
+
+static void renderWifiBleMenu() {
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  clearContentArea();
+
+  const uint8_t itemH   = kMenuHeight / 2;
+  const uint8_t sel     = ctx.menu.wifiBleIndex;
+  const uint8_t visible = 2;
+  uint8_t first = 0;
+  if (sel >= visible) first = sel - (visible - 1);
+  if (first + visible > kWifiBleMenuCount) first = kWifiBleMenuCount - visible;
+
+  display.setFont(u8g2_font_6x10_tf);
+  const int16_t asc  = display.getAscent();
+  const int16_t desc = display.getDescent();
+
+  for (uint8_t i = 0; i < visible; ++i) {
+    const uint8_t idx    = first + i;
+    const uint8_t rowTop = kMenuTop + i * itemH;
+    if (idx == sel) {
+      display.setDrawColor(1);
+      display.drawFrame(0, rowTop, kDisplayWidth, itemH);
+    }
+    display.setDrawColor(1);
+    const int16_t textY = rowTop + (itemH - (asc - desc)) / 2 + asc;
+    display.setCursor(36, static_cast<uint8_t>(textY));
+    display.print(kWifiBleMenuItems[idx]);
+    const uint8_t iconY = rowTop + (itemH - kIcon16) / 2;
+    if (idx == 0) {
+      display.drawXBMP(8, iconY, kIcon16, kIcon16, kIconReturn);
+    } else {
+      const bool active = (idx == 1 && ctx.settings.connection == ConnectionMode::BLE) ||
+                          (idx == 2 && ctx.settings.connection == ConnectionMode::Wifi);
+      constexpr uint8_t kBoxSz = 10;
+      const uint8_t boxX = kDisplayWidth - 14;
+      const uint8_t boxY = rowTop + (itemH - kBoxSz) / 2;
+      display.drawFrame(boxX, boxY, kBoxSz, kBoxSz);
+      if (active) display.drawBox(boxX + 2, boxY + 2, kBoxSz - 4, kBoxSz - 4);
+    }
+  }
+  display.setDrawColor(1);
+  sendDisplay();
+}
+
+// ---------------------------------------------------------------------------
+// Rendering: setting value adjustment
+// ---------------------------------------------------------------------------
+
+static const char *settingLabel(uint8_t slot) {
   switch (slot) {
-    case 0:
-      return "LED";
-    case 1:
-      return "Buzzer";
-    case 2:
-      return "Vibration";
-    case 3:
-      return "Sensor";
-    case 4:
-      return "OFF Timer";
-    default:
-      return "";
+    case 0: return "LED";
+    case 1: return "Buzzer";
+    case 2: return "Vibration";
+    case 3: return "Sensor";
+    case 4: return "OFF Timer";
+    default: return "";
   }
 }
 
-uint8_t settingMaxValue(uint8_t slot) {
-  return slot == 3 ? 25 : 10;
-}
+static void renderSettingAdjust() {
+  const uint8_t  slot  = ctx.menu.settingSlot;
+  const uint16_t value = (slot == 3) ? ctx.settings.sensorSens
+                       : (slot == 4) ? ctx.settings.sleepTimeoutSec
+                       : (slot == 0) ? ctx.settings.ledLevel
+                       : (slot == 1) ? ctx.settings.buzzerLevel
+                       : ctx.settings.vibLevel;
+  const uint16_t maxV  = (slot == 3) ? 25u : (slot == 4) ? kSleepTimeoutMaxSec : 10u;
 
-void renderSettingAdjust(uint8_t slot, uint16_t value) {
-  const uint16_t maxValue = slot == 4 ? kSleepTimeoutMaxSec : settingMaxValue(slot);
   display.clearBuffer();
   ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
+  clearContentArea();
 
   display.setFont(u8g2_font_9x15_tf);
   display.setCursor(10, kMenuTop + 20);
   display.print(settingLabel(slot));
 
-  char buffer[12];
+  char buf[14];
   if (slot == 4) {
     if (value == 0) {
-      snprintf(buffer, sizeof(buffer), "OFF");
-    } else if (value == 30) {
-      snprintf(buffer, sizeof(buffer), "%us", static_cast<unsigned int>(value));
+      snprintf(buf, sizeof(buf), "OFF");
+    } else if (value < 60) {
+      snprintf(buf, sizeof(buf), "%us", static_cast<unsigned>(value));
     } else {
-      const unsigned int minutes = value / 60;
-      const unsigned int seconds = value % 60;
-      snprintf(buffer, sizeof(buffer), "%um %us", minutes, seconds);
+      const unsigned m = value / 60, s = value % 60;
+      snprintf(buf, sizeof(buf), s > 0 ? "%um %us" : "%um", m, s);
     }
   } else {
-    snprintf(buffer, sizeof(buffer), "%u", static_cast<unsigned int>(value));
+    snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(value));
   }
+
   display.setFont(u8g2_font_6x10_tf);
   const uint8_t barX = kDisplayWidth - 6;
   const uint8_t barY = kMenuTop + 3;
-  const uint8_t barW = 4;
+  constexpr uint8_t barW = 4;
   const uint8_t barH = kMenuHeight - 6;
   display.drawFrame(barX, barY, barW, barH);
 
-  const uint8_t valueBoxW = slot == 4 ? 48 : 28;
-  const uint8_t valueBoxH = 18;
-  const uint8_t valueBoxX = static_cast<uint8_t>(barX - 6 - valueBoxW);
-  const uint8_t valueBoxY = kMenuTop + 30;
-  display.drawFrame(valueBoxX, valueBoxY, valueBoxW, valueBoxH);
-  const uint8_t valueWidth = display.getStrWidth(buffer);
-  const uint8_t valueX = valueBoxX + (valueBoxW - valueWidth) / 2;
-  display.setCursor(valueX, valueBoxY + 12);
-  display.print(buffer);
+  const uint8_t vbW = (slot == 4) ? 48 : 28;
+  constexpr uint8_t vbH = 18;
+  const uint8_t vbX = barX - 6 - vbW;
+  const uint8_t vbY = kMenuTop + 30;
+  display.drawFrame(vbX, vbY, vbW, vbH);
+  const uint8_t vw = display.getStrWidth(buf);
+  display.setCursor(vbX + (vbW - vw) / 2, vbY + 12);
+  display.print(buf);
 
   if (value > 0) {
-    const uint8_t fillH =
-        static_cast<uint8_t>((static_cast<uint32_t>(value) * (barH - 2)) / maxValue);
+    const uint8_t fillH = static_cast<uint8_t>((static_cast<uint32_t>(value) * (barH - 2)) / maxV);
     const uint8_t fillY = static_cast<uint8_t>(barY + barH - 1 - fillH);
     display.drawBox(barX + 1, fillY, barW - 2, fillH);
   }
-
-  display.sendBuffer();
+  sendDisplay();
 }
 
-void startSleepCountdown(uint32_t nowMs) {
-  sleepPending = true;
-  sleepStartMs = nowMs;
+// ---------------------------------------------------------------------------
+// Rendering: About screen (firmware version + HW rev + QR code)
+// ---------------------------------------------------------------------------
+
+static void renderAbout() {
+  display.clearBuffer();
+  display.drawXBMP(kDisplayWidth - kQrCodeWidth, (kDisplayHeight - kQrCodeHeight) / 2,
+                   kQrCodeWidth, kQrCodeHeight, kQrCodeBits);
+  display.setFont(u8g2_font_5x8_tf);
+  display.setCursor(2, 14); display.print(kFirmwareVersion);
+  display.setCursor(2, 26); display.print(kHardwareRev);
+  sendDisplay();
 }
 
-void cancelSleepCountdown() {
-  sleepPending = false;
-}
+// ---------------------------------------------------------------------------
+// Rendering: countdown and notification screens
+// ---------------------------------------------------------------------------
 
-void renderSleepCountdown(uint32_t nowMs) {
-  uint32_t remainingMs = 0;
-  if (nowMs < sleepStartMs + kSleepCountdownMs) {
-    remainingMs = (sleepStartMs + kSleepCountdownMs) - nowMs;
-  }
-  const uint8_t secondsLeft = static_cast<uint8_t>((remainingMs + 999) / 1000);
-
+static void renderCountdown(const char *title, uint32_t remainingMs) {
+  const uint8_t sec = static_cast<uint8_t>((remainingMs + 999) / 1000);
   display.clearBuffer();
   ui.renderStatusBar(appState);
-  display.setDrawColor(0);
-  display.drawBox(0, kMenuTop, kDisplayWidth, kMenuHeight);
-  display.setDrawColor(1);
-
+  clearContentArea();
   display.setFont(u8g2_font_9x15_tf);
-  display.setCursor(30, kMenuTop + 20);
-  display.print("Sleep in:");
-
-  char buffer[8];
-  snprintf(buffer, sizeof(buffer), "%u", secondsLeft);
+  display.setCursor((kDisplayWidth - display.getStrWidth(title)) / 2, kMenuTop + 20);
+  display.print(title);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(sec));
   display.setFont(u8g2_font_6x10_tf);
-  const uint8_t countWidth = display.getStrWidth(buffer);
-  const uint8_t countX = (kDisplayWidth - countWidth) / 2;
-  display.setCursor(countX, kMenuTop + 38);
-  display.print(buffer);
-  display.sendBuffer();
+  display.setCursor((kDisplayWidth - display.getStrWidth(buf)) / 2, kMenuTop + 38);
+  display.print(buf);
+  sendDisplay();
 }
 
-void enterDeepSleep() {
+static void renderFwUpdateComplete() {
   display.clearBuffer();
-  display.sendBuffer();
-  neopixel.off();
-  digitalWrite(PIN_5V_EN, LOW);
-  // Wait for button release so sleep doesn't instantly wake.
-  while (digitalRead(PIN_BUTTON) == LOW) {
-    delay(10);
-  }
-  delay(50);
-  // Note: Deep sleep wake requires RTC-capable GPIOs.
-  const gpio_num_t wakeGpio = static_cast<gpio_num_t>(PIN_BUTTON);
-  gpio_pullup_en(wakeGpio);
-  gpio_pulldown_dis(wakeGpio);
-  const uint64_t wakeMask = (1ULL << static_cast<uint64_t>(wakeGpio));
-  esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  if (duelEnabled) {
-    const time_t now = time(nullptr);
-    if (now > 0 && duel.nextTime() > now) {
-      const uint64_t deltaUs =
-          static_cast<uint64_t>(duel.nextTime() - now) * 1000000ULL;
-      esp_sleep_enable_timer_wakeup(deltaUs);
-    }
-  }
-  esp_deep_sleep_start();
+  display.setFont(u8g2_font_6x10_tf);
+  display.setCursor((kDisplayWidth - display.getStrWidth("FW Update complete")) / 2, kMenuTop + 22);
+  display.print("FW Update complete");
+  char ver[40];
+  snprintf(ver, sizeof(ver), "V%s -> V%s", ctx.fwPrevVersion, kFirmwareVersion);
+  display.setCursor((kDisplayWidth - display.getStrWidth(ver)) / 2, kMenuTop + 38);
+  display.print(ver);
+  sendDisplay();
 }
 
-void updateButton(uint32_t nowMs, bool &shortPress, bool &longPress, bool &extraLongPress) {
-  shortPress = false;
-  longPress = false;
-  extraLongPress = false;
+// ---------------------------------------------------------------------------
+// Button reading (short / long / extra-long press detection)
+// ---------------------------------------------------------------------------
 
+static void readButton(uint32_t nowMs, bool &shortPress, bool &longPress, bool &extraLong) {
+  shortPress = longPress = extraLong = false;
   const bool level = digitalRead(PIN_BUTTON) == LOW;
+
   if (level && !button.lastLevel) {
-    button.pressedMs = nowMs;
-    button.longReported = false;
+    button.pressedMs     = nowMs;
+    button.longReported  = false;
     button.extraReported = false;
   }
-
   if (!level && button.lastLevel) {
-    const uint32_t heldMs = nowMs - button.pressedMs;
-    if (!button.longReported && heldMs > kButtonDebounceMs) {
-      button.pendingShort = true;
-    }
+    const uint32_t held = nowMs - button.pressedMs;
+    if (!button.longReported && held > kButtonDebounceMs) button.pendingShort = true;
   }
-
   if (level) {
-    const uint32_t heldMs = nowMs - button.pressedMs;
-    if (heldMs >= kButtonExtraLongMs && !button.extraReported) {
-      extraLongPress = true;
-      button.extraReported = true;
-      button.pendingShort = false;
-    } else if (heldMs >= kButtonLongPressMs && !button.longReported) {
-      longPress = true;
-      button.longReported = true;
-      button.pendingShort = false;
+    const uint32_t held = nowMs - button.pressedMs;
+    if (held >= kButtonExtraLongMs && !button.extraReported) {
+      extraLong = true; button.extraReported = true; button.pendingShort = false;
+    } else if (held >= kButtonLongPressMs && !button.longReported) {
+      longPress = true; button.longReported = true; button.pendingShort = false;
     }
   }
-
-  if (button.pendingShort) {
-    shortPress = true;
-    button.pendingShort = false;
-  }
-
+  if (button.pendingShort) { shortPress = true; button.pendingShort = false; }
   button.lastLevel = level;
 }
 
+// ---------------------------------------------------------------------------
+// Deep sleep
+// ---------------------------------------------------------------------------
+
+static void enterDeepSleep() {
+  display.clearBuffer();
+  sendDisplay();
+  neopixel.off();
+  digitalWrite(PIN_5V_EN, LOW);
+  while (digitalRead(PIN_BUTTON) == LOW) delay(10);
+  delay(50);
+  const gpio_num_t wakeGpio = static_cast<gpio_num_t>(PIN_BUTTON);
+  gpio_pullup_en(wakeGpio);
+  gpio_pulldown_dis(wakeGpio);
+  esp_sleep_enable_ext1_wakeup(1ULL << static_cast<uint64_t>(wakeGpio), ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_deep_sleep_start();
+}
+
+// ---------------------------------------------------------------------------
+// Loop sub-handlers (return true = this handler owns the display this frame)
+// ---------------------------------------------------------------------------
+
+static bool handleFwUpdateNotice(bool shortPress, bool longPress, bool extraLong) {
+  if (!ctx.fwUpdatePending) return false;
+  if (shortPress || longPress || extraLong) { acknowledgeNewFirmware(); return false; }
+  renderFwUpdateComplete();
+  return true;
+}
+
+static bool handleSleepCountdown(uint32_t nowMs, bool shortPress, bool longPress, bool extraLong) {
+  if (!ctx.countdown.sleepPending) return false;
+  if (shortPress || longPress || extraLong) { ctx.countdown.sleepPending = false; return false; }
+  const uint32_t elapsed = nowMs - ctx.countdown.sleepStartMs;
+  if (elapsed >= kSleepCountdownMs) { enterDeepSleep(); return true; }
+  renderCountdown("Sleep in:", kSleepCountdownMs - elapsed);
+  return true;
+}
+
+static bool handleResetCountdown(uint32_t nowMs, bool shortPress, bool longPress, bool extraLong) {
+  if (!ctx.countdown.resetPending) return false;
+  if (shortPress || longPress || extraLong) { ctx.countdown.resetPending = false; return false; }
+  const uint32_t elapsed = nowMs - ctx.countdown.resetStartMs;
+  if (elapsed >= kResetCountdownMs) {
+    applyDefaultSettings();
+    saveSettings();
+    ctx.countdown.resetPending = false;
+    return false;
+  }
+  renderCountdown("Reset in:", kResetCountdownMs - elapsed);
+  return true;
+}
+
+static bool handleWifiCountdown(uint32_t nowMs, bool shortPress, bool longPress, bool extraLong) {
+  if (!ctx.countdown.wifiPending) return false;
+  if (shortPress || longPress || extraLong) { ctx.countdown.wifiPending = false; return false; }
+  const uint32_t elapsed = nowMs - ctx.countdown.wifiStartMs;
+  if (elapsed >= kWifiCountdownMs) {
+    ctx.countdown.wifiPending = false;
+    WifiServer::DashboardData dd;
+    dd.batteryPercent  = ctx.device.batteryPercent;
+    dd.charging        = ctx.device.charging;
+    dd.lastMeasurement = 0.0f;
+    dd.lastUser        = "Me";
+    dd.tempC           = 25.0f;
+    dd.humidity        = 50.0f;
+    WifiServer::enterBlocking(display, dd);
+    return false;
+  }
+  renderCountdown("FW Update:", kWifiCountdownMs - elapsed);
+  return true;
+}
+
+static bool handleQrDisplay(bool shortPress, bool longPress) {
+  if (!ctx.menu.showingQr) return false;
+  if (shortPress || longPress) { ctx.menu.showingQr = false; return false; }
+  renderAbout();
+  return true;
+}
+
+static bool handleSettingAdjust(bool shortPress, bool longPress) {
+  if (!ctx.menu.adjusting) return false;
+  const uint8_t slot = ctx.menu.settingSlot;
+  if (shortPress) {
+    if (slot == 3) {
+      ctx.settings.sensorSens = static_cast<uint8_t>(
+          ctx.settings.sensorSens >= 25 ? 1 : ctx.settings.sensorSens + 1);
+    } else if (slot == 4) {
+      uint16_t next = static_cast<uint16_t>(ctx.settings.sleepTimeoutSec + kSleepTimeoutStepSec);
+      if (next > kSleepTimeoutMaxSec) next = kSleepTimeoutMinSec;
+      ctx.settings.sleepTimeoutSec = next;
+    } else {
+      uint8_t &lv = (slot == 0) ? ctx.settings.ledLevel
+                  : (slot == 1) ? ctx.settings.buzzerLevel
+                  : ctx.settings.vibLevel;
+      lv = static_cast<uint8_t>((lv + 1) % 11);
+      applyActuatorLevels();
+    }
+    ctx.menu.settingDirty = true;
+  }
+  if (longPress) {
+    if (ctx.menu.settingDirty) { saveSettings(); ctx.menu.settingDirty = false; }
+    ctx.menu.adjusting = false;
+    renderSettingsMenu();
+    return true;
+  }
+  renderSettingAdjust();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering: measure stub screen
+// ---------------------------------------------------------------------------
+
+static void renderMeasureStub() {
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  clearContentArea();
+  display.setFont(u8g2_font_9x15_tf);
+  const char *title = "Measure";
+  display.setCursor((kDisplayWidth - display.getStrWidth(title)) / 2, kMenuTop + 20);
+  display.print(title);
+  display.setFont(u8g2_font_6x10_tf);
+  const char *hint = "Press to exit";
+  display.setCursor((kDisplayWidth - display.getStrWidth(hint)) / 2, kMenuTop + 40);
+  display.print(hint);
+  sendDisplay();
+}
+
+static bool handleMeasureScreen(bool shortPress, bool longPress) {
+  if (!ctx.measureActive) return false;
+  if (shortPress || longPress) { ctx.measureActive = false; return false; }
+  renderMeasureStub();
+  return true;
+}
+
+static void renderCalibStub() {
+  display.clearBuffer();
+  ui.renderStatusBar(appState);
+  clearContentArea();
+  display.setFont(u8g2_font_9x15_tf);
+  const char *title = "Calib";
+  display.setCursor((kDisplayWidth - display.getStrWidth(title)) / 2, kMenuTop + 20);
+  display.print(title);
+  display.setFont(u8g2_font_6x10_tf);
+  const char *hint = "Press to exit";
+  display.setCursor((kDisplayWidth - display.getStrWidth(hint)) / 2, kMenuTop + 40);
+  display.print(hint);
+  sendDisplay();
+}
+
+static bool handleCalibScreen(bool shortPress, bool longPress) {
+  if (!ctx.calibStubActive) return false;
+  if (shortPress || longPress) { ctx.calibStubActive = false; return false; }
+  renderCalibStub();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Menu navigation
+// ---------------------------------------------------------------------------
+
+static void handleMenuNav(uint32_t nowMs, bool shortPress, bool longPress, bool extraLong) {
+  // WiFi/BLE sub-submenu
+  if (ctx.menu.inWifiBleMenu) {
+    if (shortPress)
+      ctx.menu.wifiBleIndex = static_cast<uint8_t>((ctx.menu.wifiBleIndex + 1) % kWifiBleMenuCount);
+    if (longPress) {
+      if (ctx.menu.wifiBleIndex == 0) {
+        ctx.menu.inWifiBleMenu = false;
+      } else {
+        ctx.settings.connection = (ctx.menu.wifiBleIndex == 1) ? ConnectionMode::BLE : ConnectionMode::Wifi;
+        saveSettings();
+        ctx.menu.inWifiBleMenu = false;
+      }
+    }
+    if (extraLong) enterDeepSleep();
+    if (ctx.menu.inWifiBleMenu) { renderWifiBleMenu(); return; }
+    renderSettingsMenu();
+    return;
+  }
+
+  // Settings submenu
+  if (ctx.menu.inSubmenu) {
+    if (shortPress)
+      ctx.menu.subIndex = static_cast<uint8_t>((ctx.menu.subIndex + 1) % kSettingsMenuCount);
+    if (longPress) {
+      if (ctx.menu.subIndex == 0) {
+        ctx.menu.inSubmenu = false;
+        ctx.menu.subIndex  = 0;
+      } else if (ctx.menu.subIndex == kSettingCalibIndex) {
+        ctx.calibStubActive = true;
+      } else if (ctx.menu.subIndex >= kSettingLedIndex && ctx.menu.subIndex <= kSettingVibIndex) {
+        ctx.menu.adjusting    = true;
+        ctx.menu.settingSlot  = static_cast<uint8_t>(ctx.menu.subIndex - kSettingLedIndex);
+        ctx.menu.settingDirty = false;
+      } else if (ctx.menu.subIndex == kSettingBuzzTestIndex) {
+        ctx.buzzerTest.prevLevel = ctx.settings.buzzerLevel;
+        buzzer.setLevel(10);
+        buzzer.playTone(kBuzzerTestToneHz, kBuzzerTestDurationMs, 100);
+        ctx.buzzerTest.endMs  = nowMs + kBuzzerTestDurationMs;
+        ctx.buzzerTest.active = true;
+      } else if (ctx.menu.subIndex == kSettingSensIndex) {
+        ctx.menu.adjusting    = true;
+        ctx.menu.settingSlot  = 3;
+        ctx.menu.settingDirty = false;
+      } else if (ctx.menu.subIndex == kSettingSleepIndex) {
+        ctx.menu.adjusting    = true;
+        ctx.menu.settingSlot  = 4;
+        ctx.menu.settingDirty = false;
+      } else if (ctx.menu.subIndex == kSettingWifiBleIndex) {
+        ctx.menu.inWifiBleMenu = true;
+        ctx.menu.wifiBleIndex  = (ctx.settings.connection == ConnectionMode::Wifi) ? 2 : 1;
+      } else if (ctx.menu.subIndex == kSettingOtaIndex) {
+        ctx.countdown.wifiPending = true;
+        ctx.countdown.wifiStartMs = nowMs;
+      } else if (ctx.menu.subIndex == kSettingResetIndex) {
+        ctx.countdown.resetPending = true;
+        ctx.countdown.resetStartMs = nowMs;
+      }
+    }
+    if (extraLong) enterDeepSleep();
+    if (ctx.menu.inSubmenu) { renderSettingsMenu(); return; }
+    renderMainMenu();
+    return;
+  }
+
+  // Main menu
+  if (shortPress)
+    ctx.menu.mainIndex = static_cast<uint8_t>((ctx.menu.mainIndex + 1) % kMainMenuCount);
+  if (longPress) {
+    switch (ctx.menu.mainIndex) {
+      case kMainMeasureIndex:
+        ctx.measureActive = true;
+        break;
+      case kMainSleepIndex:
+        ctx.countdown.sleepPending = true;
+        ctx.countdown.sleepStartMs = nowMs;
+        break;
+      case kMainAboutIndex:
+        ctx.menu.showingQr = true;
+        break;
+      case kMainSettingsIndex:
+        ctx.menu.inSubmenu = true;
+        ctx.menu.subIndex  = 0;
+        break;
+      default:
+        break;
+    }
+  }
+  if (extraLong) enterDeepSleep();
+  renderMainMenu();
+}
+
+// ---------------------------------------------------------------------------
+// setup / loop
+// ---------------------------------------------------------------------------
+
 void setup() {
   Serial.begin(115200);
-  Serial.println();
-  Serial.print("Reset reason: ");
+  Serial.print("\nReset reason: ");
   Serial.println(static_cast<int>(esp_reset_reason()));
-  delay(200);
+
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_5V_EN, OUTPUT);
-  digitalWrite(PIN_5V_EN, HIGH);
-  pinMode(PIN_LED, OUTPUT);
-  delay(100);
-  buzzer.begin();
-  vib.begin();
-  neopixel.begin();
-  measurement.begin();
-
-  OTA_update::markAppValidCancelRollback();
+  digitalWrite(PIN_5V_EN, LOW);
+  pinMode(PIN_SHAKE, INPUT);
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  scanI2c();
+  delay(10);
+
+  // Register BatteryManager event handler before begin() so no events are missed.
+  // NOTE: callback is invoked from the BMS monitor task — keep it short.
+  battery.onEvent([](BatteryManager::Event evt, const BatteryManager& bms) {
+    switch (evt) {
+      case BatteryManager::Event::VoltageUpdate:
+        ctx.device.batteryPercent = bms.socPercent();
+        ctx.device.charging       = bms.isCharging();
+        ctx.device.plugged        = bms.isVbusPresent();
+        log_i("[APP] VBAT %u mV  SoC %u%%  charging %d",
+              bms.voltageMv(), bms.socPercent(), bms.isCharging());
+        break;
+
+      case BatteryManager::Event::StateChanged:
+        log_i("[APP] BMS state -> %u", static_cast<uint8_t>(bms.state()));
+        break;
+
+      case BatteryManager::Event::Fault: {
+        const uint8_t f = bms.lastFaultRegister();
+        uint8_t reason = 0, ts = 0;
+        if      (f & 0x80)         { reason = 1; }             // watchdog
+        else if ((f & 0x30) == 0x10) reason = 2;               // input fault
+        else if ((f & 0x30) == 0x20) reason = 3;               // thermal shutdown
+        else if ((f & 0x30) == 0x30) reason = 4;               // safety timer
+        else if  (f & 0x08)          reason = 5;               // battery OVP
+        else {
+          const uint8_t ntc = f & 0x07;
+          if (ntc) { reason = 1; ts = (ntc == 2 || ntc == 6) ? 2 : 1; }
+        }
+        ctx.device.chargerFaultReason = reason;
+        ctx.device.chargerTsFault     = ts;
+        break;
+      }
+
+      case BatteryManager::Event::Low:
+        log_w("[APP] Battery low (%u mV)", bms.voltageMv());
+        break;
+
+      case BatteryManager::Event::Critical:
+        log_e("[APP] Battery critical (%u mV)!", bms.voltageMv());
+        break;
+    }
+  });
+
+  // Initialize BMS before enabling the 5V rail (battery is always present)
+  if (!battery.begin()) Serial.println("BatteryManager begin failed");
 
   display.begin();
-  display.clearBuffer();
-  delay(1500);
   ui.begin();
+  display.clearBuffer();
+  sendDisplay();
 
-  appState.batteryPercent = 78;
-  appState.charging = true;
-  appState.connection = ConnectionMode::BLE;
-  appState.lastUser = "Test";
-  appState.lastMeasurement = 0.42f;
-  mainMenuIndex = 0;
-  submenuIndex = 0;
-  inSubmenu = false;
-  inWifiBleMenu = false;
-  appState.menuIndex = 0;
-
-  if (!LittleFS.begin()) {
-    LittleFS.begin(true);
-  }
+  if (!LittleFS.begin()) LittleFS.begin(true);
   if (!loadSettings()) {
     applyDefaultSettings();
     saveSettings();
   }
+
+  // Enable 5V rail after charger is configured
+  digitalWrite(PIN_5V_EN, HIGH);
+  delay(50);
+
+  buzzer.begin();
+  vib.begin();
+  neopixel.begin();
   applyActuatorLevels();
-  applyMicThresholdFromSetting();
-  measurement.setHeaterPercent(kHeaterPercent);
-  measurement.setHeatingMs(kMeasureCountdownSec * 1000UL);
-  measurement.setBlowHoldMs(kBlowHoldMs);
-  measurement.setMicGraceMs(kMicGraceMs);
-  measurement.setRetryDisplayMs(kRetryMessageMs);
-  measurement.setBuzzerStrength(kMicBuzzerStrength);
   neopixel.onColor(kDefaultNeopixelR, kDefaultNeopixelG, kDefaultNeopixelB);
-  char storedVersion[sizeof(fwPrevVersion)] = "";
-  if (loadStoredFirmwareVersion(storedVersion, sizeof(storedVersion))) {
-    if (strcmp(storedVersion, kFirmwareVersion) != 0) {
-      strncpy(fwPrevVersion, storedVersion, sizeof(fwPrevVersion) - 1);
-      fwPrevVersion[sizeof(fwPrevVersion) - 1] = '\0';
-      fwUpdatePending = true;
-    }
-  } else {
-    saveStoredFirmwareVersion(kFirmwareVersion);
-  }
-  roulette.reset();
-  duel.disable();
-  randomSeed(micros());
-  lastInteractionMs = millis();
+
+  // Confirm OTA image is valid (cancels rollback timer)
+  WifiServer::markAppValid();
+  checkFirmwareVersion();
+
+  ctx.lastInteractionMs = millis();
 }
 
 void loop() {
   const uint32_t nowMs = millis();
+
   buzzer.update(nowMs);
   vib.update(nowMs);
-  if (buzzerTestActive && static_cast<int32_t>(nowMs - buzzerTestEndMs) >= 0) {
-    buzzer.setLevel(buzzerTestPrevLevel);
-    buzzerTestActive = false;
+
+  // Restore buzzer level after test tone
+  if (ctx.buzzerTest.active && static_cast<int32_t>(nowMs - ctx.buzzerTest.endMs) >= 0) {
+    buzzer.setLevel(ctx.buzzerTest.prevLevel);
+    ctx.buzzerTest.active = false;
   }
-  bool shortPress = false;
-  bool longPress = false;
-  bool extraLongPress = false;
-  updateButton(nowMs, shortPress, longPress, extraLongPress);
-  if (shortPress || longPress || extraLongPress) {
-    lastInteractionMs = nowMs;
+
+  bool shortPress = false, longPress = false, extraLong = false;
+  readButton(nowMs, shortPress, longPress, extraLong);
+  if (shortPress || longPress || extraLong) {
+    ctx.lastInteractionMs = nowMs;
     vib.onFor(50, 100);
   }
 
-  if (sleepPending) {
-    if (shortPress || longPress || extraLongPress) {
-      cancelSleepCountdown();
-    } else if (nowMs - sleepStartMs >= kSleepCountdownMs) {
-      enterDeepSleep();
-    } else {
-      renderSleepCountdown(nowMs);
-    }
-    return;
-  }
-  if (fwUpdatePending) {
-    if (shortPress || longPress || extraLongPress) {
-      saveStoredFirmwareVersion(kFirmwareVersion);
-      fwUpdatePending = false;
-    } else {
-      renderFwUpdateComplete();
-    }
-    return;
-  }
-  if (sleepTimeoutSec > 0 &&
-      nowMs - lastInteractionMs >= static_cast<uint32_t>(sleepTimeoutSec) * 1000UL &&
-      !measuringActive && roulettePhase == RoulettePhase::Idle && duelPhase == DuelPhase::Idle &&
-      !sleepPending && !resetPending) {
-    enterDeepSleep();
-  }
-  if (resetPending) {
-    if (shortPress || longPress || extraLongPress) {
-      cancelResetCountdown();
-    } else if (nowMs - resetStartMs >= kResetCountdownMs) {
-      applyDefaultSettings();
-      saveSettings();
-      resetPending = false;
-    } else {
-      renderResetCountdown(nowMs);
-    }
-    return;
-  }
-  if (otaPending) {
-    if (shortPress || longPress || extraLongPress) {
-      cancelOtaCountdown();
-    } else if (nowMs - otaStartMs >= kOtaCountdownMs) {
-      otaPending = false;
-      OTA_update::enterUpdateModeBlocking(display);
-    } else {
-      renderOtaCountdown(nowMs);
-    }
-    return;
-  }
-  if (duelPhase != DuelPhase::Idle) {
-    if (duelPhase == DuelPhase::Versus) {
-      renderDuelVersus(duelUserA, duelUserB);
-      if (shortPress || longPress || extraLongPress) {
-        duelPhase = DuelPhase::FirstStart;
-      }
-    } else if (duelPhase == DuelPhase::FirstStart) {
-      renderDuelPrompt(duelUserA, "Starts");
-      if (shortPress || longPress || extraLongPress) {
-        duelPhase = DuelPhase::SecondStart;
-      }
-    } else if (duelPhase == DuelPhase::SecondStart) {
-      renderDuelPrompt(duelUserB, "Starts");
-      if (shortPress || longPress || extraLongPress) {
-        float diff = fabsf(duelMeasA - duelMeasB);
-        String loser = (duelMeasA >= duelMeasB) ? duelUserB : duelUserA;
-        if (diff < 0.001f) {
-          loser = (random(2) == 0) ? duelUserA : duelUserB;
-        }
-        int sips = static_cast<int>(ceilf(diff * 10.0f));
-        if (sips < 1) {
-          sips = 1;
-        }
-        duelMessage = loser + " drinks " + String(sips) + " sips";
-        duelPhase = DuelPhase::ShowResult;
-        duelPhaseStartMs = nowMs;
-      }
-    } else {
-      renderDuelResult();
-      if (shortPress || longPress || extraLongPress ||
-          (nowMs - duelPhaseStartMs >= kDuelResultMs)) {
-        duelPhase = DuelPhase::Idle;
-      }
-    }
-    return;
-  }
-  if (roulettePhase != RoulettePhase::Idle) {
-    if (roulettePhase == RoulettePhase::ShowPromille) {
-      renderRoulettePromille();
-      if (nowMs - roulettePhaseStartMs >= kRoulettePromilleMs) {
-        roulettePhase = RoulettePhase::ShowResult;
-        roulettePhaseStartMs = nowMs;
-      }
-    } else {
-      renderRouletteResult();
-      if (shortPress || longPress || extraLongPress ||
-          (nowMs - roulettePhaseStartMs >= kRouletteResultMs)) {
-        roulettePhase = RoulettePhase::Idle;
-      }
-    }
-    return;
-  }
-  if (duelEnabled) {
-    const time_t now = time(nullptr);
-    if (now > 0 && duel.due(now)) {
-      JsonDocument doc;
-      if (loadUsers(doc)) {
-        JsonObject users = doc["users"].as<JsonObject>();
-        String ids[20];
-        const size_t count = collectEligibleUserIds(users, "duel", ids, 20);
-        if (count >= 2) {
-          const String userA = pickWeightedUser(ids, count, duel, String());
-          const String userB = pickWeightedUser(ids, count, duel, userA);
-          if (userA.length() > 0 && userB.length() > 0) {
-            duel.rememberPick(userA);
-            duel.rememberPick(userB);
-            duelUserA = userA;
-            duelUserB = userB;
-            duelMeasA = recentMeasurement(users, userA, now);
-            duelMeasB = recentMeasurement(users, userB, now);
-            duelPhase = DuelPhase::Versus;
-            duelPhaseStartMs = nowMs;
-          }
-        }
-      }
-      duel.scheduleNext(now);
-    }
-  }
+  syncAppState();
 
-  const char *const *menuItems = kMenuItems;
-  size_t menuCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
-  uint8_t *activeIndex = &mainMenuIndex;
+  // Priority handlers — each returns true if it owns the display this frame
+  if (handleSleepCountdown(nowMs, shortPress, longPress, extraLong)) return;
+  if (handleFwUpdateNotice(shortPress, longPress, extraLong)) return;
 
-  if (measuringActive) {
-    measurement.update(nowMs, buzzer);
-    const MeasurementController::Phase currentPhase = measurement.phase();
-    if (currentPhase != lastMeasurementPhase) {
-      if (lastMeasurementPhase == MeasurementController::Phase::Heating &&
-          currentPhase == MeasurementController::Phase::Blow) {
-        vib.pulse(kHeatingDoneVibCount, kHeatingDoneVibOnMs, kHeatingDoneVibOffMs,
-                  kMeasurementVibStrength);
-      } else if (currentPhase == MeasurementController::Phase::Done) {
-        vib.onFor(kMeasurementDoneVibMs, kMeasurementVibStrength);
-      }
-      lastMeasurementPhase = currentPhase;
-    }
-    if (measurement.isComplete()) {
-      appState.lastMeasurement = static_cast<float>(measurement.alcValue()) / 1000.0f;
-      measurement.stop();
-      measuringActive = false;
-      lastMeasurementPhase = MeasurementController::Phase::Idle;
-      return;
-    }
-    if (rouletteEnabled) {
-      if (measurement.isBlowPhase() && (shortPress || longPress)) {
-        bool allowRoulette = true;
-        JsonDocument doc;
-        if (loadUsers(doc)) {
-          JsonObject users = doc["users"].as<JsonObject>();
-          if (!userFlagEnabled(users, String(appState.lastUser), "roulette")) {
-            allowRoulette = false;
-          }
-        }
-        if (allowRoulette) {
-          rouletteLastHit = roulette.fire();
-          roulettePhase = RoulettePhase::ShowPromille;
-          roulettePhaseStartMs = nowMs;
-          measurement.stop();
-          measuringActive = false;
-          lastMeasurementPhase = MeasurementController::Phase::Idle;
-          return;
-        }
-      }
-    }
-    if (shortPress || longPress) {
-      measurement.stop();
-      buzzer.off();
-      measuringActive = false;
-      lastMeasurementPhase = MeasurementController::Phase::Idle;
-      return;
-    }
-    renderMeasurement(measurement, nowMs);
-    if (!extraLongPress) {
-      return;
-    }
-  }
-  if (showingQr) {
-    if (shortPress || longPress) {
-      showingQr = false;
-      return;
-    }
-    renderQrCode();
-    if (!extraLongPress) {
-      return;
-    }
-  }
-  if (adjustingSetting) {
-    if (shortPress) {
-      if (adjustingSettingSlot == 3) {
-        settingSensValue =
-            static_cast<uint8_t>(settingSensValue >= 25 ? 1 : (settingSensValue + 1));
-        applyMicThresholdFromSetting();
-      } else if (adjustingSettingSlot == 4) {
-        uint16_t next = static_cast<uint16_t>(sleepTimeoutSec + kSleepTimeoutStepSec);
-        if (next > kSleepTimeoutMaxSec) {
-          next = kSleepTimeoutMinSec;
-        }
-        sleepTimeoutSec = next;
-      } else {
-        settingValues[adjustingSettingSlot] =
-            static_cast<uint8_t>((settingValues[adjustingSettingSlot] + 1) % 11);
-        applyActuatorLevels();
-      }
-      settingsDirty = true;
-    }
-    if (longPress) {
-      if (settingsDirty) {
-        saveSettings();
-        settingsDirty = false;
-      }
-      adjustingSetting = false;
-      return;
-    }
-    const uint16_t currentValue =
-        adjustingSettingSlot == 3
-            ? settingSensValue
-            : (adjustingSettingSlot == 4 ? sleepTimeoutSec
-                                         : settingValues[adjustingSettingSlot]);
-    renderSettingAdjust(adjustingSettingSlot, currentValue);
-    return;
-  }
-  if (inWifiBleMenu) {
-    menuItems = kWifiBleMenuItems;
-    menuCount = sizeof(kWifiBleMenuItems) / sizeof(kWifiBleMenuItems[0]);
-    activeIndex = &wifiBleMenuIndex;
-  } else if (inSubmenu && mainMenuIndex == kPartyMenuIndex) {
-    menuItems = kPartyMenuItems;
-    menuCount = sizeof(kPartyMenuItems) / sizeof(kPartyMenuItems[0]);
-    activeIndex = &submenuIndex;
-  } else if (inSubmenu) {
-    menuItems = submenuItemsForMain(mainMenuIndex, menuCount);
-    activeIndex = &submenuIndex;
-  }
-
-  if (shortPress && menuCount > 0) {
-    *activeIndex = (*activeIndex + 1) % static_cast<uint8_t>(menuCount);
-  }
-
-  if (longPress) {
-    if (inWifiBleMenu) {
-      if (wifiBleMenuIndex == 0) {
-        inWifiBleMenu = false;
-        return;
-      }
-      appState.connection =
-          wifiBleMenuIndex == 1 ? ConnectionMode::BLE : ConnectionMode::Wifi;
-      saveSettings();
-      return;
-    }
-    if (inSubmenu) {
-      if (mainMenuIndex == kPartyMenuIndex && submenuIndex == kPartyDuelIndex) {
-        duelEnabled = !duelEnabled;
-        if (duelEnabled) {
-          const time_t now = time(nullptr);
-          if (now > 0) {
-            duel.enable(now);
-          }
-        } else {
-          duel.disable();
-        }
-        return;
-      }
-      if (mainMenuIndex == kPartyMenuIndex && submenuIndex == kPartyRouletteIndex) {
-        rouletteEnabled = !rouletteEnabled;
-        roulette.reset();
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingWifiBleIndex) {
-        inWifiBleMenu = true;
-        wifiBleMenuIndex = appState.connection == ConnectionMode::Wifi ? 2 : 1;
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex &&
-          submenuIndex >= kSettingLedIndex &&
-          submenuIndex <= kSettingVibIndex) {
-        adjustingSetting = true;
-        adjustingSettingSlot = static_cast<uint8_t>(submenuIndex - kSettingLedIndex);
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingBuzzTestIndex) {
-        startBuzzerTest(nowMs);
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingSensIndex) {
-        adjustingSetting = true;
-        adjustingSettingSlot = 3;
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingSleepIndex) {
-        adjustingSetting = true;
-        adjustingSettingSlot = 4;
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingResetIndex) {
-        startResetCountdown(nowMs);
-        return;
-      }
-      if (mainMenuIndex == kSettingsMenuIndex && submenuIndex == kSettingOtaIndex) {
-        startOtaCountdown(nowMs);
-        return;
-      }
-      if (submenuIndex == 0) {
-        mainMenuIndex = 0;
-        submenuIndex = 0;
-        inSubmenu = false;
-      }
-    } else if (mainMenuIndex == kSleepMenuIndex) {
-      startSleepCountdown(nowMs);
-      return;
-    } else if (mainMenuIndex == kAboutMenuIndex) {
-      showingQr = true;
-      return;
-    } else if (mainMenuIndex == 0) {
-      measuringActive = true;
-      lastMeasurementPhase = MeasurementController::Phase::Heating;
-      measurement.start(nowMs);
-      return;
-    } else if (hasSubmenuForMain(mainMenuIndex)) {
-      inSubmenu = true;
-      submenuIndex = 0;
-    }
-  }
-
-  if (inWifiBleMenu) {
-    appState.menuIndex = wifiBleMenuIndex;
-  } else if (inSubmenu && mainMenuIndex == kPartyMenuIndex) {
-    appState.menuIndex = submenuIndex;
-  } else {
-    appState.menuIndex = inSubmenu ? submenuIndex : mainMenuIndex;
-  }
-
-  if (extraLongPress) {
+  // Auto-sleep when idle
+  if (ctx.settings.sleepTimeoutSec > 0 &&
+      !ctx.countdown.sleepPending &&
+      !ctx.countdown.resetPending &&
+      nowMs - ctx.lastInteractionMs >= static_cast<uint32_t>(ctx.settings.sleepTimeoutSec) * 1000UL) {
     enterDeepSleep();
   }
 
-  if (nowMs - lastUiTickMs >= kUiTickMs) {
-    if (inWifiBleMenu) {
-      renderWifiBleMenu(wifiBleMenuIndex);
-    } else if (inSubmenu && mainMenuIndex == kPartyMenuIndex) {
-      renderPartyMenu(submenuIndex);
-    } else if (!inSubmenu) {
-      renderMainMenuWithMeasureIcon(mainMenuIndex);
-    } else {
-      renderSubmenuWithReturnIcon(menuItems, menuCount, submenuIndex);
-    }
-    lastUiTickMs = nowMs;
+  if (handleResetCountdown(nowMs, shortPress, longPress, extraLong)) return;
+  if (handleWifiCountdown(nowMs, shortPress, longPress, extraLong)) return;
+  if (handleCalibScreen(shortPress, longPress)) return;
+  if (handleMeasureScreen(shortPress, longPress)) return;
+  if (handleQrDisplay(shortPress, longPress)) return;
+  if (handleSettingAdjust(shortPress, longPress)) return;
+
+  if (nowMs - ctx.lastUiTickMs >= kUiTickMs) {
+    ctx.lastUiTickMs = nowMs;
+    handleMenuNav(nowMs, shortPress, longPress, extraLong);
   }
 }
