@@ -30,7 +30,7 @@ constexpr uint16_t kSleepTimeoutMinSec  = 0;
 constexpr uint16_t kSleepTimeoutMaxSec  = 900;
 constexpr uint16_t kSleepTimeoutStepSec = 30;
 constexpr uint8_t  kPwmChannelBuzzer     = 0;
-constexpr uint8_t  kPwmChannelVib        = 1;
+constexpr uint8_t  kPwmChannelVib        = 2;  // channel 0+1 share a timer; 2 uses a separate timer
 constexpr uint32_t kBuzzerPwmHz          = 2700;
 constexpr uint32_t kVibPwmHz             = 20000;
 constexpr uint16_t kBuzzerTestToneHz     = 2000;
@@ -830,7 +830,7 @@ static void handleMenuNav(uint32_t nowMs, bool shortPress, bool longPress, bool 
       } else if (ctx.menu.subIndex == kSettingBuzzTestIndex) {
         ctx.buzzerTest.prevLevel = ctx.settings.buzzerLevel;
         buzzer.setLevel(10);
-        buzzer.playTone(kBuzzerTestToneHz, kBuzzerTestDurationMs, 100);
+        buzzer.playTone(nowMs, kBuzzerTestToneHz, kBuzzerTestDurationMs, 100);
         ctx.buzzerTest.endMs  = nowMs + kBuzzerTestDurationMs;
         ctx.buzzerTest.active = true;
       } else if (ctx.menu.subIndex == kSettingSensIndex) {
@@ -992,7 +992,7 @@ void loop() {
   readButton(nowMs, shortPress, longPress, extraLong);
   if (shortPress || longPress || extraLong) {
     ctx.lastInteractionMs = nowMs;
-    vib.onFor(50, 100);
+    vib.onFor(nowMs, 50, 100);
   }
 
   syncAppState();

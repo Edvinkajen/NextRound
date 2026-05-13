@@ -6,25 +6,37 @@ constexpr uint8_t  kAddr   = 0x6A;
 constexpr uint8_t  kIntPin = 11;
 
 // Register addresses
-constexpr uint8_t kRegAdcCtrl  = 0x02;
-constexpr uint8_t kRegChgCtrl1 = 0x03;
-constexpr uint8_t kRegIchg     = 0x04;
-constexpr uint8_t kRegIprechg  = 0x05;
-constexpr uint8_t kRegVreg     = 0x06;
-constexpr uint8_t kRegTimer    = 0x07;
-constexpr uint8_t kRegStatus   = 0x0B;
-constexpr uint8_t kRegFault    = 0x0C;
-constexpr uint8_t kRegBatv     = 0x0E;
-constexpr uint8_t kRegDevInfo  = 0x14;
+constexpr uint8_t kRegInputCtrl = 0x00;
+constexpr uint8_t kRegAdcCtrl   = 0x02;
+constexpr uint8_t kRegChgCtrl1  = 0x03;
+constexpr uint8_t kRegIchg      = 0x04;
+constexpr uint8_t kRegIprechg   = 0x05;
+constexpr uint8_t kRegVreg      = 0x06;
+constexpr uint8_t kRegTimer     = 0x07;
+constexpr uint8_t kRegStatus    = 0x0B;
+constexpr uint8_t kRegFault     = 0x0C;
+constexpr uint8_t kRegBatv      = 0x0E;
+constexpr uint8_t kRegDevInfo   = 0x14;
 
 // Bit masks
+constexpr uint8_t kMaskIinlim    = 0x3F;  // REG00[5:0] input current limit
 constexpr uint8_t kMaskConvRate  = 0x80;  // REG02[7] continuous ADC
 constexpr uint8_t kMaskConvStart = 0x40;  // REG02[6] start conversion
+constexpr uint8_t kMaskHvdcpEn  = 0x08;  // REG02[3] HVDCP_EN
+constexpr uint8_t kMaskMaxcEn   = 0x04;  // REG02[2] MAXC_EN
+constexpr uint8_t kMaskAutoDpdm = 0x01;  // REG02[0] AUTO_DPDM_EN
+constexpr uint8_t kMaskOtgCfg   = 0x20;  // REG03[5] OTG_CONFIG
 constexpr uint8_t kMaskChgCfg   = 0x10;  // REG03[4] charge enable
 constexpr uint8_t kMaskIchg     = 0x7F;  // REG04[6:0]
 constexpr uint8_t kMaskVreg     = 0xFC;  // REG06[7:2]
 constexpr uint8_t kMaskWatchdog = 0x30;  // REG07[5:4]
+constexpr uint8_t kMaskPn       = 0x38;  // REG14[5:3] PN field
+constexpr uint8_t kPnBq25895    = 0x38;  // PN = 0b111 → BQ25895
+constexpr uint8_t kMaskDevRev   = 0x03;  // REG14[1:0] DEV_REV
 constexpr uint8_t kMaskRegRst   = 0x80;  // REG14[7] soft reset
+
+// IINLIM register code derived from BQ25895_IINLIM_MA (header): (mA − 100) / 50
+constexpr uint8_t kIinlimCode = static_cast<uint8_t>((BQ25895_IINLIM_MA - 100u) / 50u);
 
 // REG0B charge status bits [4:3]
 constexpr uint8_t kMaskVbusStat = 0xC0;
@@ -73,40 +85,80 @@ bool BatteryManager::begin(TwoWire& wire) {
   wire_     = &wire;
   instance_ = this;
 
-  // 1. Soft reset
+  // Register bit definitions: SLUSC88C §8.4 (BQ25895 Register Maps)
+
+  // 1. Soft reset — restores all registers to datasheet defaults
   writeRegister(kRegDevInfo, kMaskRegRst);
   delay(100);
 
-  // 2. Disable I2C watchdog — CRITICAL: verify read-back before proceeding
+  // 2. Verify chip identity: REG14[5:3] PN = 0b111 → BQ25895
+  {
+    uint8_t devInfo = 0;
+    if (!readRegister(kRegDevInfo, devInfo)) {
+      log_e("[BMS] ABORT: cannot read REG14 — I2C fault");
+      return false;
+    }
+    if ((devInfo & kMaskPn) != kPnBq25895) {
+      log_e("[BMS] ABORT: PN mismatch REG14=0x%02X (expected PN bits=0b111)", devInfo);
+      return false;
+    }
+    log_i("[BMS] BQ25895 confirmed  DEV_REV=%u", devInfo & kMaskDevRev);
+  }
+
+  // 3. Disable I2C watchdog — CRITICAL: verify read-back before proceeding
   if (!verifyWrite(kRegTimer, kMaskWatchdog, 0x00, "watchdog disable")) {
     log_e("[BMS] ABORT: watchdog disable failed — chip registers unsafe");
     return false;
   }
 
-  // 3. Charge current 448 mA: REG04[6:0] = 0x07 (7 × 64 mA = 448 mA)
+  // 4. Disable OTG/boost (REG03[5]=0).
+  //    Default OTG_CONFIG=1 risks boost from battery if OTG pin floats high;
+  //    this board has no OTG function.
+  if (!verifyWrite(kRegChgCtrl1, kMaskOtgCfg, 0x00, "OTG disable")) {
+    log_e("[BMS] OTG disable failed");
+  }
+
+  // 5. Disable automatic USB source detection: HVDCP_EN, MAXC_EN, AUTO_DPDM_EN = 0.
+  //    Prevents VBUS negotiation to 9 V/12 V and the auto-IINLIM rise to 3.25 A
+  //    that DCP detection would otherwise impose. IINLIM is set explicitly in step 6.
+  //    ICO_EN (REG02[4]) and CONV_RATE (REG02[6]) are preserved by the mask.
+  if (!verifyWrite(kRegAdcCtrl,
+                   kMaskHvdcpEn | kMaskMaxcEn | kMaskAutoDpdm, 0x00,
+                   "src-det disable")) {
+    log_e("[BMS] source detection disable failed");
+  }
+
+  // 6. Input current limit: BQ25895_IINLIM_MA via REG00[5:0].
+  //    Hardware cap: EN_ILIM=1 (default, not changed), R_ILIM=324 Ω → ~1.1 A typ.
+  //    Register code = (BQ25895_IINLIM_MA − 100 mA offset) / 50 mA = kIinlimCode.
+  if (!verifyWrite(kRegInputCtrl, kMaskIinlim, kIinlimCode, "IINLIM=1000mA")) {
+    log_e("[BMS] IINLIM write failed");
+  }
+
+  // 7. Charge current 448 mA: REG04[6:0] = 0x07 (7 × 64 mA = 448 mA)
   verifyWrite(kRegIchg, kMaskIchg, 0x07, "ICHG=448mA");
 
-  // 4. Charge voltage 4.208 V: VREG[7:2] = 0x17 → (0x17 << 2) = 0x5C
+  // 8. Charge voltage 4.208 V: VREG[7:2] = 0x17 → (0x17 << 2) = 0x5C
   //    Formula: 3840 + VREG × 16 mV → (4208 - 3840) / 16 = 23 = 0x17
   if (!updateBits(kRegVreg, kMaskVreg, static_cast<uint8_t>(0x17 << 2))) {
     log_e("[BMS] VREG write failed");
   }
 
-  // 5. Precharge / termination current: REG05 default 64 mA each — write 0x00
+  // 9. Precharge / termination current: REG05 default 64 mA each — write 0x00
   writeRegister(kRegIprechg, 0x00);
 
-  // 6. Enable charging
+  // 10. Enable charging
   if (!updateBits(kRegChgCtrl1, kMaskChgCfg, kMaskChgCfg)) {
     log_e("[BMS] charge enable failed");
   }
 
-  // 7. Enable ADC continuous mode (~1 Hz auto-conversion)
+  // 11. Enable ADC continuous mode (~1 Hz auto-conversion)
   if (!updateBits(kRegAdcCtrl, kMaskConvRate | kMaskConvStart,
                                 kMaskConvRate | kMaskConvStart)) {
     log_e("[BMS] ADC continuous mode failed");
   }
 
-  // 8. Configure INT pin and attach interrupt (active-low, external pull-up)
+  // 12. Configure INT pin and attach interrupt (active-low, external pull-up)
   pinMode(kIntPin, INPUT);
   attachInterrupt(digitalPinToInterrupt(kIntPin), intIsr, FALLING);
 

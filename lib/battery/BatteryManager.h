@@ -7,7 +7,24 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 
+// Input current limit written to REG00[5:0] during begin().
+// Encode: (mA − 100) / 50. Must not exceed the hardware cap set by R_ILIM.
+// Board: R_ILIM = 324 Ω → I_INMAX ≈ 1.10 A typ (988 mA – 1.20 A over K_ILIM tolerance).
+constexpr uint16_t BQ25895_IINLIM_MA = 1000;
+
 /*
+ * BQ25895 default behaviours disabled in begin() (see SLUSC88C §8.4):
+ *
+ *   OTG_CONFIG  (REG03[5]) — cleared to 0: chip default is 1, which would
+ *     allow boost from battery if the OTG pin floats high. No OTG function
+ *     on this board.
+ *
+ *   HVDCP_EN    (REG02[3]) — cleared to 0: prevents negotiation of VBUS to
+ *   MAXC_EN     (REG02[2])   9 V / 12 V via Qualcomm Quick Charge or
+ *   AUTO_DPDM_EN(REG02[0])   Maxim protocols. IINLIM is set explicitly via
+ *                             BQ25895_IINLIM_MA instead of the automatic
+ *                             3.25 A that DCP detection would impose.
+ *
  * Usage example:
  *
  *   BatteryManager battery;

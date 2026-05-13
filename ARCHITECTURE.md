@@ -10,80 +10,123 @@ Byggfil: `platformio.ini` — board `esp32-s3-devkitm-1`, partitionstabell med O
 
 ```
 src/
-  main.cpp          — Applikationens huvudfil (setup + loop + all UI-logik)
-  actuators.h/.cpp  — Buzzer, VibrationMotor, NeopixelLed
-  bq25895.h/.cpp    — Batteriladdare (I2C)
-  wifi_server.h/.cpp — WiFi SoftAP, OTA-uppladdning, HTML-dashboard
-  pins.h            — Alla GPIO-pinndefinitioner
-  OTA.h/.cpp        — OTA-hjälpfunktioner (markAppValid)
-  qrcode_bitmap.h   — Förrenderad QR-kod som XBM-bitmap
-  device_info.h     — kFirmwareVersion, kHardwareRev
+  main.cpp            — Applikationens huvudfil (setup + loop + all UI-logik)
+  actuators.h/.cpp    — Buzzer, VibrationMotor, NeopixelLed (PwmActuator-bas)
+  wifi_server.h/.cpp  — WiFi SoftAP, OTA-uppladdning, HTML-dashboard (namespace)
+  pins.h              — Alla GPIO-pinndefinitioner
+  qrcode_bitmap.h     — Förrenderad QR-kod som XBM-bitmap (About-skärmen)
 
-lib/ui/src/
-  ui.h/.cpp         — Ui-klass: statusbar, menulista, faultvisning
-  appstate.h        — AppState-struct (data som Ui-klassen läser)
-  ui_assets.h       — UiBitmap/UiAssets-struct för utbytbara bitmaps
-  display_constants.h — kDisplayWidth/Height, kStatusBarHeight, kMenuTop/Height
+include/
+  device_info.h       — kFirmwareVersion, kHardwareRev, kBuildDate
+  app_state.h         — AppState-struct + ConnectionMode-enum (äldre kopia)
+
+lib/
+  battery/
+    BatteryManager.h/.cpp  — BQ25895-batteriladdare via I2C + FreeRTOS-task
+    library.properties
+  ui/src/
+    ui.h/.cpp              — Ui-klass: statusbar, menulista, faultvisning
+    appstate.h             — AppState-struct + ConnectionMode-enum (aktiv kopia)
+    ui_assets.h            — UiBitmap/UiAssets-struct för utbytbara bitmaps
+    display_constants.h    — kDisplayWidth/Height, kStatusBarHeight, etc.
+  README
 ```
+
+> **Notera:** Det finns två kopior av `AppState`/`ConnectionMode` — en i `lib/ui/src/appstate.h` (inkluderas av ui.h) och en i `include/app_state.h`. Den aktiva är den i `lib/ui/src/`.
 
 ---
 
 ## 2. Hårdvara
 
-### 2.1 BQ25895 — Batteriladdare (`src/bq25895.h/.cpp`)
+### 2.1 BatteryManager — BQ25895 batteriladdare (`lib/battery/BatteryManager.h/.cpp`)
 
-Kommunicerar via I2C. Konfigureras i `setup()` **innan** 5V-rälsen aktiveras.
+Kommunicerar via I2C (adress `0x6A`). Initialiseras i `setup()` innan 5V-rälsen aktiveras. Kör en egen FreeRTOS-task (`bms_mon`, prio 3, APP_CPU) som pollar laddaren via INT-pin (GPIO 11, falling edge) eller var 1:e sekund.
 
-**Konfiguration (i main.cpp):**
-- `inputCurrentLimitMa = 500` — begränsar USB-inflöde
-- `fastChargeCurrentMa = 1024`
-- `chargeVoltageMv = 4208`
-- `enableBatfet = true`, `batfetResetEnable = false`
+**Konfiguration (i `begin()`):**
+- Ingångsström: 1000 mA (`BQ25895_IINLIM_MA`)
+- Laddningsström: 448 mA (REG04 = 0x07)
+- Laddningsspänning: 4,208 mV
+- Watchdog: avstängd
+- OTG/boost: avstängd
+- Automatisk USB-detektion (HVDCP/MAXC/DPDM): avstängd
+- ADC kontinuerligt läge: på (~1 Hz)
 
-`Bq25895::readStatus(bms)` returnerar:
-- `batteryPercent` (0–100)
-- `charging` (bool)
-- `plugged` (bool)
-- `faultReason` (0 = ingen, 1–6 = felkod)
-- `tsFault` (temperaturfel: 1=kallt, 2=varmt)
+**Event-API:** `BatteryManager::onEvent(callback)` anropar vid:
+- `VoltageUpdate` — ny spänning/SoC avläst
+- `StateChanged` — ändring i laddningsstate
+- `Fault` — feltillstånd (watchdog, input, thermal, timer, battery OVP, NTC)
+- `Low` — VBAT < 3300 mV
+- `Critical` — VBAT < 3000 mV
 
-Faultstatus visas som en popup-overlay av `Ui::drawFault()` om `chargerFaultReason != 0`.
+**Public accessors:**
+- `voltageMv()` — batterispänning i mV
+- `socPercent()` — 0–100 % (linjär interpolering i uppslagstabell)
+- `state()` — Discharging / PreCharge / FastCharge / ChargeComplete / Fault
+- `isCharging()`, `isVbusPresent()`, `hasFault()`, `lastFaultRegister()`
+- `wireMutex()` — SemaphoreHandle för I2C-mutex (delas med display för att undvika I2C-konflikter)
 
-**Polling:** Var 30 s (`kHwPollIntervalMs`). Tvingad vid uppstart.
+**SoC-tabell (no-load Li-ion):**
+
+| mV   | % |
+|------|---|
+| 4200 | 100 |
+| 4060 | 85 |
+| 3920 | 70 |
+| 3800 | 55 |
+| 3720 | 40 |
+| 3660 | 25 |
+| 3500 | 10 |
+| 3300 | 0 |
 
 ### 2.2 Aktuatorer (`src/actuators.h/.cpp`)
 
 Tre klasser som alla använder ESP32:s `ledc` PWM-system (8-bitars upplösning).
 
+#### PwmActuator (basklass)
+- Delad logik för pin/channel/level/strength
+- `levelToPercent(level)` — nivå 0–10 mappar linjärt: 0→0%, 1→25%, 10→100%
+- `scalePercent(base, cmd)` — scaling för override-styrka
+- `writePercent(enabled)` — skriver duty cycle
+
 #### Buzzer
 - PWM-kanal 0, 2700 Hz (`kPwmChannelBuzzer`, `kBuzzerPwmHz`)
-- Pin: `PIN_BUZZER`
-- API: `on()`, `off()`, `onFor(ms)`, `playTone(hz, ms)`, `setLevel(0–10)`, `update(nowMs)`
-- `playTone()` ändrar PWM-frekvensen med `ledcWriteTone()` och stänger av efter `durationMs`
-- Nivå 0–10 mappar till 0–100% duty via `levelToPercent()` (0=0%, 1=25%, 10=100%)
-- `update()` anropas varje loop-iteration för att hantera tidsstyrda lägen
+- Pin: `PIN_BUZZER` (13)
+- Lägen: `Idle`, `TimedOn`, `TimedTone`, `ContinuousTone`, `ContinuousOn`
+- API: `on()`, `on(strength%)`, `off()`, `onFor(now, ms)`, `onFor(now, ms, strength%)`, `playTone(now, hz, ms)`, `playTone(now, hz, ms, strength%)`, `setLevel(0–10)`, `update(nowMs)`
+- `playTone()` ändrar PWM-frekvens med `ledcWriteTone()`, `off()` återställer frekvensen
+- `update()` hanterar tidsstyrda lägen, anropas varje loop-iteration
 
 #### VibrationMotor
-- PWM-kanal 1, 20 000 Hz
-- Pin: `PIN_VIB`
-- API: `on()`, `off()`, `onFor(ms, strength%)`, `pulse(count, onMs, offMs, strength%)`, `setLevel(0–10)`, `update(nowMs)`
-- Stödjer tre lägen: `Idle`, `TimedOn`, `PulsingOn/PulsingOff`
-- `pulse()` blinkar motorn `count` gånger med konfigurerbar on/off-tid
-- Används för taktil bekräftelse: varje knapptryckning ger `vib.onFor(50, 100)`
+- PWM-kanal 2, 20 000 Hz
+- Pin: `PIN_VIB` (17)
+- Lägen: `Idle`, `TimedOn`, `PulsingOn`, `PulsingOff`
+- API: `on()`, `on(strength%)`, `off()`, `onFor(now, ms)`, `onFor(now, ms, strength%)`, `pulse(now, count, onMs, offMs)`, `pulse(now, count, onMs, offMs, strength%)`, `setLevel(0–10)`, `update(nowMs)`
+- Varje knapptryckning ger `vib.onFor(nowMs, 50, 100)` (50 ms, 100 % styrka)
 
 #### NeopixelLed
 - Adafruit NeoPixel, en pixel
-- Pin: `PIN_LED`
-- API: `onColor(r, g, b)`, `off()`, `setLevel(0–10)`, `apply()`
+- Pin: `PIN_LED` (8)
+- API: `onColor(r, g, b)`, `onColor(hex)`, `off()`, `setLevel(0–10)`, `isActive()`
 - Startfärg: RGB(200, 60, 130) — definieras av `kDefaultNeopixelR/G/B`
+- Ljusstyrka skalas via `setBrightness(level * 255 / 10)`
 - Stängs av i `enterDeepSleep()`
 
 ### 2.3 GPIO och 5V-räls
 
-- `PIN_5V_EN` — OUTPUT, sätts LOW vid init, HIGH efter att laddaren konfigurerats
-- `PIN_BUTTON` — INPUT_PULLUP, aktiv LOW
-- `PIN_SHAKE` — INPUT (accelerometer-interrupt, oanvänt i nuvarande kod)
-- `PIN_I2C_SDA`, `PIN_I2C_SCL` — Wire-buss
+| Pin | Funktion |
+|-----|----------|
+| 5   | `PIN_ALC_SENSOR` — etanolsensor (ADC) |
+| 6   | `PIN_HEATER` — sensorvärmare (PWM/GPIO) |
+| 4   | `PIN_MIC` — mikrofon (ADC) |
+| 8   | `PIN_LED` — NeoPixel (GPIO) |
+| 9   | `PIN_I2C_SDA` — I2C data |
+| 10  | `PIN_I2C_SCL` — I2C clock |
+| 11  | `PIN_INT` — BQ25895 INT (falling edge) |
+| 12  | `PIN_BUTTON` — INPUT_PULLUP, aktiv LOW |
+| 13  | `PIN_BUZZER` — piezo-buzzer (PWM) |
+| 15  | `PIN_5V_EN` — 5V-räls enable, sätts LOW vid init, HIGH efter laddarkonfig |
+| 17  | `PIN_VIB` — vibrationsmotor (PWM) |
+| 18  | `PIN_SHAKE` — accelerometer-interrupt (INPUT, oanvänt) |
 
 ---
 
@@ -94,22 +137,27 @@ Tre klasser som alla använder ESP32:s `ledc` PWM-system (8-bitars upplösning).
 En global `static AppContext ctx` håller all körningsstate. Uppdelad i substruct:
 
 ```
-ctx.menu        — navigationsstate (vilken meny, vilket index, justeringsläge)
-ctx.device      — hårdvarustatus (batteri, laddning, charger fault)
-ctx.settings    — användarinställningar (ledLevel, buzzerLevel, vibLevel,
-                  sleepTimeoutSec, connection)
-ctx.buzzerTest  — state för pågående buzzertest
-ctx.countdown   — flaggor och starttider för sleep/reset/wifi-nedräkning
-ctx.fwUpdatePending   — satt efter OTA, visas som informationsskärm
-ctx.fwPrevVersion     — sparad version från innan OTA
+ctx.menu            — navigationsstate (mainIndex, subIndex, inSubmenu, inWifiBleMenu,
+                      wifiBleIndex, showingQr, adjusting, settingSlot, settingDirty)
+ctx.device          — hårdvarustatus (batteryPercent, charging, plugged,
+                      chargerFaultReason, chargerTsFault)
+ctx.settings        — användarinställningar (ledLevel, buzzerLevel, vibLevel,
+                      sensorSens, sleepTimeoutSec, connection)
+ctx.buzzerTest      — state för pågående buzzertest (active, endMs, prevLevel)
+ctx.countdown       — flaggor och starttider för sleep/reset/wifi-nedräkning
+ctx.fwUpdatePending — satt efter OTA, visas som informationsskärm
+ctx.fwPrevVersion   — sparad version från innan OTA
+ctx.measureActive   — Measure-skärm aktiv
+ctx.calibStubActive — Calib-skärm aktiv
+ctx.lastMeasurement — senaste uppmätta värde
 ctx.lastInteractionMs — används för auto-sleep timeout
-ctx.lastUiTickMs      — begränsar UI-uppdateringstakt till kUiTickMs (30 ms)
+ctx.lastUiTickMs    — begränsar UI-uppdateringstakt till kUiTickMs (30 ms)
 ```
 
 ### 3.2 AppState
 
 `AppState appState` är den struct som Ui-klassen läser. Fylls i av `syncAppState()` varje loop-iteration:
-- `batteryPercent`, `charging`, `connection`
+- `batteryPercent`, `charging`, `connection`, `lastUser`, `lastMeasurement`
 - `chargerFaultReason`, `chargerTsFault`
 - `menuIndex` (används av `Ui::drawMenu()` för att markera valt alternativ)
 
@@ -117,21 +165,24 @@ ctx.lastUiTickMs      — begränsar UI-uppdateringstakt till kUiTickMs (30 ms)
 
 `loop()` kör i fast rotation och arbetar i denna ordning:
 
-1. `pollHardware(nowMs)` — uppdatera batteri- och laddarstatus
-2. `buzzer.update()`, `vib.update()` — hantera tidsstyrda aktuatorlägen
-3. Avsluta buzzertest om tid löpt ut
-4. `readButton()` — detektera knappevents
-5. Ge vibrationsfeedback vid knapptryckning
-6. `syncAppState()` — kopiera ctx → appState
-7. **Priority handlers** (returnerar `true` om de äger displayen denna frame):
+1. `buzzer.update(nowMs)`, `vib.update(nowMs)` — hantera tidsstyrda aktuatorlägen
+2. Avsluta buzzertest om tid löpt ut
+3. `readButton(nowMs)` — detektera knappevents
+4. Ge vibrationsfeedback vid knapptryckning
+5. `syncAppState()` — kopiera ctx → appState
+6. **Priority handlers** (returnerar `true` om de äger displayen denna frame):
    - `handleSleepCountdown` — nedräkning innan sleep
    - `handleFwUpdateNotice` — visa OTA-banner
    - Auto-sleep check (om timeout löpt ut och inga aktiva processer)
    - `handleResetCountdown` — nedräkning innan fabriksåterställning
    - `handleWifiCountdown` — nedräkning innan WiFi-läge startas
+   - `handleCalibScreen` — Calib-stubbskärm
+   - `handleMeasureScreen` — Measure-stubbskärm
    - `handleQrDisplay` — visa About-skärm med QR
    - `handleSettingAdjust` — hantera inställningsjustering
-8. `handleMenuNav()` — normal menystyrning (begränsad till kUiTickMs)
+7. `handleMenuNav()` — normal menystyrning (begränsad till kUiTickMs)
+
+> **Notering:** Till skillnad från äldre arkitekturbeskrivningar pollas inte hårdvara (batteri) i loopen längre — BatteryManager kör en separat FreeRTOS-task som anropar callback vid händelser.
 
 ---
 
@@ -140,22 +191,25 @@ ctx.lastUiTickMs      — begränsar UI-uppdateringstakt till kUiTickMs (30 ms)
 ### 4.1 Hierarki
 
 ```
-Huvudmeny (3 alternativ)
-  ├── Turn OFF  → sleep-nedräkning (3 s), sedan deep sleep
-  ├── Settings  → inställningsundermeny
+Huvudmeny (4 alternativ)
+  ├── Measure    → Measure-stubbskärm (placeholder)
+  ├── Turn OFF   → sleep-nedräkning (3 s), sedan deep sleep
+  ├── Settings   → inställningsundermeny
   │     ├── Return
-  │     ├── LED          → värdesjustering (slot 0, 0–10)
-  │     ├── Buzzer       → värdesjustering (slot 1, 0–10)
-  │     ├── Vibration    → värdesjustering (slot 2, 0–10)
-  │     ├── Buzzer Test  → spelar testton direkt
-  │     ├── WIFI/BLE     → sub-undermeny för anslutningsval
+  │     ├── Calib       → Calib-stubbskärm (placeholder)
+  │     ├── LED         → värdesjustering (slot 0, 0–10)
+  │     ├── Buzzer      → värdesjustering (slot 1, 0–10)
+  │     ├── Vibration   → värdesjustering (slot 2, 0–10)
+  │     ├── Buzzer Test → spelar testton direkt
+  │     ├── WIFI/BLE    → sub-undermeny för anslutningsval
   │     │     ├── Return
-  │     │     ├── BLE    (radio-knapp)
-  │     │     └── WiFi   (radio-knapp)
-  │     ├── OFF Timer    → värdesjustering (slot 3, 0–900 s i steg om 30)
-  │     ├── FW Update    → WiFi-nedräkning (3 s), sedan enterBlocking()
-  │     └── Reset        → fabriksåterställning (10 s nedräkning, kan avbrytas)
-  └── About     → QR-kod + firmware/hw-version
+  │     │     ├── BLE    (radio-knapp, kvadrat)
+  │     │     └── WiFi   (radio-knapp, kvadrat)
+  │     ├── Sensor      → värdesjustering (slot 3, 0–25)
+  │     ├── OFF Timer   → värdesjustering (slot 4, 0–900 s i steg om 30)
+  │     ├── FW Update   → WiFi-nedräkning (3 s), sedan WifiServer::enterBlocking()
+  │     └── Reset       → fabriksåterställning (10 s nedräkning)
+  └── About      → QR-kod + firmware/hw-version
 ```
 
 ### 4.2 Knapptryckningstolkning
@@ -172,7 +226,7 @@ Logiken finns i `readButton()`. Hysteresis hanteras med `pendingShort`-flaggan s
 
 ### 4.3 Menyscrollning
 
-Alla menyer visar exakt **2 alternativ** synliga samtidigt (halva menu-arean = `kMenuHeight / 2` px per rad). Scrollning beräknas dynamiskt baserat på valt index: `first = max(0, selected - 1)`. Det valda alternativet markeras med en ram (`drawFrame`).
+Alla menyer visar exakt **2 alternativ** synliga samtidigt (halva menu-arean = `kMenuHeight / 2` px per rad). Scrollning beräknas dynamiskt baserat på valt index: `first = max(0, selected - 1)`. Det valda alternativet markeras med en ram (`drawFrame`). Varje menyrad har en 16×16 XBM-ikon till vänster.
 
 ### 4.4 Inställningsjustering (renderSettingAdjust)
 
@@ -180,9 +234,14 @@ Slot-mapping:
 - Slot 0 = LED-nivå (0–10)
 - Slot 1 = Buzzernivå (0–10)
 - Slot 2 = Vibrationsnivå (0–10)
-- Slot 3 = Auto-sleep timeout (0–900 s i steg om 30)
+- Slot 3 = Sensorkänslighet (1–25)
+- Slot 4 = Auto-sleep timeout (0–900 s i steg om 30)
 
-Visar ett vertikalt stapeldiagram (fill-bar) samt värde i en ram. Kort tryck ökar värdet, långt tryck sparar och lämnar.
+Visar ett vertikalt stapeldiagram (fill-bar) samt värde i en ram. För OFF Timer visas värdet formaterat som `OFF`, `30s`, `1m`, `5m 0s` etc. Kort tryck ökar värdet (med wraparound), långt tryck sparar och lämnar.
+
+### 4.5 WiFi/BLE-submeny
+
+Kvadratiska knappar med ifylld innerruta för aktivt läge (`drawFrame` + `drawBox`). Långt tryck på BLE eller WiFi sparar valet via `saveSettings()` och återgår till Settings-menyn.
 
 ---
 
@@ -194,6 +253,7 @@ JSON-schema:
   "led": 5,
   "buzz": 5,
   "vib": 5,
+  "sens": 10,
   "sleepTimeout": 300,
   "connection": "wifi"
 }
@@ -205,54 +265,58 @@ JSON-schema:
 
 ---
 
-## 6. WiFi-läge och OTA (`src/wifi_server.h/.cpp`)
+## 6. WiFi-läge och OTA
 
-### 6.1 Aktivering
+### 6.1 WifiServer (`src/wifi_server.h/.cpp`)
 
 Aktiveras via Settings → FW Update. En 3-sekunders nedräkning (`kWifiCountdownMs`) visas och kan avbrytas. Därefter anropas `WifiServer::enterBlocking(display, dd)`.
 
-### 6.2 enterBlocking()
-
-Blockerar main loop helt under WiFi-sessionens gång.
-
+**enterBlocking():**
 1. Genererar slumpmässigt SSID (`NextRound-XXXXXX`) och lösenord (8 hex-tecken) med `esp_random()`
 2. Startar SoftAP med dessa credentials
 3. Renderar SSID + IP (`192.168.4.1`) + QR-kod på OLED
 4. Startar `WebServer` på port 80
 5. Exponerar routes:
-   - `GET /` — HTML-dashboard med batteristatus, laddningsstatus, senaste mätning (0.0 i nuläget), temp/fukt (25/50 som defaults)
-   - `POST /update` — tar emot firmware-binär, kör OTA via ESP Arduino Update-biblioteket, visar progress på OLED
+   - `GET /` — HTML-dashboard (mörkt tema) med batteri, laddning, temp/fukt, senaste mätning
+   - `GET /api/status` — JSON: battery, charging, temp, humidity, lastMeasurement, lastUser
+   - `GET /api/history` — JSON-array ur `/users.json` (user, promille, timestamp)
+   - `GET /status` — OTA-status som plain text
+   - `POST /update` — tar emot firmware-binär, kör OTA via ESP Arduino Update-biblioteket
 6. Avslutas när knappen hålls ≥2 s eller OTA-reboot sker
 
-### 6.3 OTA rollback-skydd
+### 6.2 OTA rollback-skydd
 
-`WifiServer::markAppValid()` kallas i `setup()` varje gång firmware startar korrekt. Detta bekräftar OTA-imagen och avbryter automatisk rollback. Implementerat via `esp_ota_ops.h`.
+`WifiServer::markAppValid()` (via `esp_ota_mark_app_valid_cancel_rollback()`) anropas i `setup()` varje gång firmware startar korrekt för att bekräfta OTA-imagen.
 
-### 6.4 FW-versionsdetektering
+### 6.3 FW-versionsdetektering
 
-`checkFirmwareVersion()` läser `/fw_info.txt` från LittleFS. Om versionen skiljer sig från `kFirmwareVersion` (i `device_info.h`) sätts `ctx.fwUpdatePending = true`. Vid nästa startup visas en "FW Update complete V1.x → V1.y"-banner som kvitteras med valfri knapptryckning. Därefter skrivs ny version till filen.
+`checkFirmwareVersion()` läser `/fw_info.txt` från LittleFS. Om versionen skiljer sig från `kFirmwareVersion` (i `include/device_info.h`) sätts `ctx.fwUpdatePending = true`. Vid nästa startup visas en "FW Update complete V1.x → V1.y"-banner som kvitteras med valfri knapptryckning. Därefter skrivs ny version till filen.
 
 ---
 
 ## 7. Statusbar (`lib/ui/`)
 
-Ritad av `Ui::drawStatusBar()` och `Ui::renderStatusBar()` (anropas från main.cpp varje frame).
+Ritas av `Ui::drawStatusBar()` (anropas från main.cpp som `ui.renderStatusBar(appState)`).
 
 **Innehåll (vänster till höger):**
+- Användarnamn + senaste mätvärde (t.ex. "Me 0.00")
+- Separator (vertikal linje)
+- Anslutningsikon: WiFi-bitmap, BLE-bitmap eller text "OFF"
 - Laddningsikon (blixt-bitmap) om `state.charging == true`
-- Anslutningsikon: WiFi-bitmap, BLE-bitmap, eller text "OFF"
 - Batteri-ram (20×8 px) med procentuell fyllning + terminalblock (2×4 px)
 
 **Faultvisning:** `Ui::drawFault()` renderar en inverterad overlay-box mitt på skärmen med "Charger fault" + feltext om `chargerFaultReason != 0`. Visas alltid ovanpå befintlig menyinnehåll.
 
+**UiAssets-stöd:** Alla ikoner (statusbar, navBar, menuBackground, iconBle/Wifi/Charge/Battery) kan bytas ut via `setAssets()` med egna bitmap-data.
+
 **Displaylayout:**
 ```
-Y=0   ┌────────────────────────────────────────────────┐  kStatusBarHeight px
-      │  [WiFi/BLE]  [⚡]  [====    ] 75%              │
-Y=kMenuTop ├────────────────────────────────────────────────┤  kMenuHeight px
-      │  [Icon]  MenuItem 1                            │  kMenuHeight/2 px
-      │  [Icon]  MenuItem 2  ◄ selected (frame)        │  kMenuHeight/2 px
-Y=64  └────────────────────────────────────────────────┘
+Y=0   ┌────────────────────────────────────────────────┐  kStatusBarHeight=14 px
+      │  Me 0.00  │  [WiFi/BLE]  [⚡]  [====    ] 75%  │
+Y=16  ├────────────────────────────────────────────────┤  kMenuHeight=46 px
+      │  [Icon]  MenuItem 1                            │  kMenuHeight/2=23 px
+      │  [Icon]  MenuItem 2  ◄ selected (frame)        │  kMenuHeight/2=23 px
+Y=62  └────────────────────────────────────────────────┘
 ```
 
 ---
@@ -282,14 +346,12 @@ Y=64  └───────────────────────�
 | `kSleepCountdownMs` | 3 000 ms | Nedräkning innan sleep |
 | `kResetCountdownMs` | 10 000 ms | Nedräkning innan fabriksåterställning |
 | `kWifiCountdownMs` | 3 000 ms | Nedräkning innan WiFi-läge |
+| `kSleepTimeoutMinSec` | 0 s | Min auto-sleep |
 | `kSleepTimeoutMaxSec` | 900 s | Max auto-sleep (15 min) |
 | `kSleepTimeoutStepSec` | 30 s | Steg i sleep-timeout-inställning |
-| `kHwPollIntervalMs` | 30 000 ms | BQ25895-pollintervall |
 | `kBuzzerTestToneHz` | 2 000 Hz | Testton-frekvens |
 | `kBuzzerTestDurationMs` | 500 ms | Testtonens längd |
-| `kChargerInputCurrentLimitMa` | 500 mA | USB-ingångsström |
-| `kChargerFastChargeCurrentMa` | 1 024 mA | Snabbladdningsström |
-| `kChargerVoltageMv` | 4 208 mV | Laddningsspänning |
+| `kDefaultNeopixelR/G/B` | 200/60/130 | NeoPixel-startfärg |
 
 ---
 
@@ -298,7 +360,7 @@ Y=64  └───────────────────────�
 | Bibliotek | Användning |
 |---|---|
 | `olikraus/U8g2` | OLED-display (I2C SSD1306, full buffer-läge) |
-| `bblanchon/ArduinoJson` | settings.json, wifi_server dashboard |
+| `bblanchon/ArduinoJson` | settings.json, wifi_server dashboard, users.json |
 | `ricmoo/QRCode` | QR-kodgenerering i wifi_server |
 | `adafruit/Adafruit NeoPixel` | RGB-LED |
 
